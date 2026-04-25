@@ -11,7 +11,8 @@
     "dev": "tsx watch --clear-screen=false src/server.ts",
     "start": "tsx src/server.ts",
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "smoke": "tsx scripts/smoke.ts"
   },
   "repository": {
     "type": "git",

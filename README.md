@@ -35,16 +35,29 @@ the workarounds. See [docs/decisions.md](./docs/decisions.md).
 
 ## Status
 
-**v0.1 — scaffold.** Fastify server with `/v1/health` and `/v1/meta`,
-SQLite schema for sessions + events + projects. Subprocess adapters
-(`claude-agent-acp`, `pi --mode rpc`) and the prompt/cancel/permission
-endpoints land in subsequent commits.
+**v0.1 — feature-complete for solo use.** Sessions, events with SSE,
+prompts, cancel, permissions, projects. Adapters for `echo` (stub),
+`claude-agent-acp`, and `pi --mode rpc`. Smoke test runs end-to-end.
+
+| | |
+|---|---|
+| Sessions CRUD | `203289d` |
+| Events log + SSE | `7e90a93` |
+| AgentProcess + echo + prompts | `24e1dc0` |
+| claude-agent-acp adapter | `a6d8ca0` |
+| pi --mode rpc adapter | `74fbd24` |
+| Projects CRUD | `987a24d` |
+
+Of droidcode's 20 documented Rivet workarounds, **17 are eliminated by
+wagent's design**, 3 are n/a (client-side concerns or features wagent
+doesn't ship). See [docs/limitations-tracker.md](./docs/limitations-tracker.md)
+for the full table.
 
 ## Quick start
 
 ```bash
 cd ~/src/wagent
-direnv allow            # nix flake → node 22 + sandbox-agent on PATH (legacy, will drop)
+direnv allow            # nix flake → node 22 (sandbox-agent dep stays in PATH during transition)
 npm install
 npm run dev             # tsx watch, Fastify on :2468
 ```
@@ -54,7 +67,23 @@ Then:
 ```bash
 curl http://localhost:2468/v1/health
 curl http://localhost:2468/v1/meta
+curl -X POST http://localhost:2468/v1/sessions \
+  -H 'content-type: application/json' \
+  -d '{"agent":"echo","cwd":"/tmp"}'
 ```
+
+## Smoke test
+
+```bash
+npm run smoke                      # echo only — no external deps required
+SMOKE_AGENTS=echo,claude npm run smoke   # also exercise claude-agent-acp
+                                          # (needs ANTHROPIC_API_KEY or `claude /login`)
+SMOKE_AGENTS=echo,pi npm run smoke        # also exercise pi (needs `pi` on PATH)
+```
+
+Boots the server in-process with a temp SQLite, creates a session per
+agent, opens an SSE stream, sends a prompt, asserts a `stop` event
+arrives with monotonic event indices.
 
 ## Configuration
 
