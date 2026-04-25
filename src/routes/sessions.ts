@@ -1,10 +1,11 @@
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, FastifyReply } from 'fastify'
 import type { SessionStore } from '../sessions/store.js'
+import type { SessionBus } from '../bus.js'
 import type { AgentKind, ApiError } from '../types.js'
 
 const VALID_AGENTS: AgentKind[] = ['claude', 'pi', 'echo']
 
-function bad(reply: import('fastify').FastifyReply, status: number, code: string, message: string): ApiError {
+function bad(reply: FastifyReply, status: number, code: string, message: string): ApiError {
   reply.code(status)
   return { error: { code, message } }
 }
@@ -18,7 +19,13 @@ function validateCwd(cwd: unknown): string | null {
   return trimmed
 }
 
-export function registerSessionRoutes(app: FastifyInstance, store: SessionStore) {
+export interface SessionsDeps {
+  sessionStore: SessionStore
+  bus: SessionBus
+}
+
+export function registerSessionRoutes(app: FastifyInstance, deps: SessionsDeps) {
+  const store = deps.sessionStore
   app.get('/v1/sessions', async (req) => {
     const includeDestroyed = (req.query as { destroyed?: string })?.destroyed === 'true'
     return { sessions: store.list({ includeDestroyed }) }
@@ -73,6 +80,7 @@ export function registerSessionRoutes(app: FastifyInstance, store: SessionStore)
   app.delete<{ Params: { id: string } }>('/v1/sessions/:id', async (req, reply) => {
     const ok = store.delete(req.params.id)
     if (!ok) return bad(reply, 404, 'not_found', `session ${req.params.id} not found`)
+    deps.bus.drop(req.params.id)
     reply.code(204).send()
   })
 }

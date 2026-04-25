@@ -3,7 +3,10 @@ import cors from '@fastify/cors'
 import { loadConfig } from './config.js'
 import { openDatabase } from './db.js'
 import { SessionStore } from './sessions/store.js'
+import { EventStore } from './events/store.js'
+import { SessionBus } from './bus.js'
 import { registerSessionRoutes } from './routes/sessions.js'
+import { registerEventRoutes } from './routes/events.js'
 
 const VERSION = '0.1.0'
 
@@ -45,7 +48,11 @@ async function main() {
   }))
 
   const sessionStore = new SessionStore(db)
-  registerSessionRoutes(app, sessionStore)
+  const eventStore = new EventStore(db)
+  const bus = new SessionBus()
+
+  registerSessionRoutes(app, { sessionStore, bus })
+  registerEventRoutes(app, { sessionStore, eventStore, bus })
 
   const shutdown = async () => {
     try {
