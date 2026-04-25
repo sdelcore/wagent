@@ -1,0 +1,27 @@
+{
+  "name": "wagent",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "tsx src/test.ts",
+    "serve": "sandbox-agent server --no-token --host 0.0.0.0 --port 2468 --cors-allow-origin http://localhost:5173 --cors-allow-origin http://localhost:3000"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sdelcore/wagent.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/sdelcore/wagent/issues"
+  },
+  "homepage": "https://github.com/sdelcore/wagent#readme",
+  "dependencies": {
+    "sandbox-agent": "^0.4.2",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}
