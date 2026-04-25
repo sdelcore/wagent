@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import type { SessionStore } from '../sessions/store.js'
 import type { SessionBus } from '../bus.js'
+import type { AgentSupervisor } from '../agent/supervisor.js'
 import type { AgentKind, ApiError } from '../types.js'
 
 const VALID_AGENTS: AgentKind[] = ['claude', 'pi', 'echo']
@@ -22,6 +23,7 @@ function validateCwd(cwd: unknown): string | null {
 export interface SessionsDeps {
   sessionStore: SessionStore
   bus: SessionBus
+  supervisor: AgentSupervisor
 }
 
 export function registerSessionRoutes(app: FastifyInstance, deps: SessionsDeps) {
@@ -78,9 +80,14 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionsDeps) 
   })
 
   app.delete<{ Params: { id: string } }>('/v1/sessions/:id', async (req, reply) => {
-    const ok = store.delete(req.params.id)
-    if (!ok) return bad(reply, 404, 'not_found', `session ${req.params.id} not found`)
-    deps.bus.drop(req.params.id)
+    const id = req.params.id
+    if (!store.get(id)) return bad(reply, 404, 'not_found', `session ${id} not found`)
+    // Close the running subprocess first so it can't append events
+    // after the session row is gone (FK would reject anyway, but the
+    // close is the right semantic).
+    await deps.supervisor.closeOne(id)
+    store.delete(id)
+    deps.bus.drop(id)
     reply.code(204).send()
   })
 }
