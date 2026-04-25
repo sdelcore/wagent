@@ -8,6 +8,7 @@ import { SessionBus } from './bus.js'
 import { AgentSupervisor } from './agent/supervisor.js'
 import { echoFactory } from './agent/echo.js'
 import { claudeAcpFactory } from './agent/claude_acp.js'
+import { piRpcFactory } from './agent/pi_rpc.js'
 import { registerSessionRoutes } from './routes/sessions.js'
 import { registerEventRoutes } from './routes/events.js'
 import { registerPromptRoutes } from './routes/prompts.js'
@@ -46,7 +47,7 @@ async function main() {
     hostname: config.hostname,
     home: config.home,
     capabilities: {
-      agents: ['echo', 'claude'] as string[],
+      agents: ['echo', 'claude', 'pi'] as string[],
       auth: config.token ? 'bearer' : 'none',
     },
   }))
@@ -63,7 +64,7 @@ async function main() {
     factories: {
       echo: echoFactory,
       claude: claudeAcpFactory,
-      // pi adapter lands next commit
+      pi: piRpcFactory,
     },
   })
 
