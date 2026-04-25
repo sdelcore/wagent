@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify'
 import type { SessionStore } from '../sessions/store.js'
 import type { SessionBus } from '../bus.js'
 import type { AgentSupervisor } from '../agent/supervisor.js'
+import { probeAgent } from '../agent/availability.js'
 import type { AgentKind, ApiError } from '../types.js'
 
 const VALID_AGENTS: AgentKind[] = ['claude', 'pi', 'echo']
@@ -40,6 +41,18 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionsDeps) 
     const agent = body.agent
     if (typeof agent !== 'string' || !VALID_AGENTS.includes(agent as AgentKind)) {
       return bad(reply, 400, 'invalid_agent', `agent must be one of ${VALID_AGENTS.join(', ')}`)
+    }
+    // Precheck: refuse early if the agent isn't available on this host
+    // so the caller gets a meaningful error code instead of a 500 at
+    // subprocess spawn time.
+    const availability = await probeAgent(agent as AgentKind)
+    if (!availability.installed) {
+      return bad(
+        reply,
+        409,
+        'agent_not_available',
+        availability.notes ?? `agent ${agent} is not available on this host`,
+      )
     }
     const cwd = validateCwd(body.cwd)
     if (!cwd) {

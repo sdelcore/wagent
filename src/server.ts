@@ -14,6 +14,8 @@ import { registerSessionRoutes } from './routes/sessions.js'
 import { registerEventRoutes } from './routes/events.js'
 import { registerPromptRoutes } from './routes/prompts.js'
 import { registerProjectRoutes } from './routes/projects.js'
+import { registerAgentRoutes } from './routes/agents.js'
+import { probeAll } from './agent/availability.js'
 
 const VERSION = '0.1.0'
 
@@ -43,16 +45,21 @@ async function main() {
 
   app.get('/v1/health', async () => ({ status: 'ok' }))
 
-  app.get('/v1/meta', async () => ({
-    name: 'wagent',
-    version: VERSION,
-    hostname: config.hostname,
-    home: config.home,
-    capabilities: {
-      agents: ['echo', 'claude', 'pi'] as string[],
-      auth: config.token ? 'bearer' : 'none',
-    },
-  }))
+  app.get('/v1/meta', async () => {
+    const agents = await probeAll()
+    return {
+      name: 'wagent',
+      version: VERSION,
+      hostname: config.hostname,
+      home: config.home,
+      capabilities: {
+        // Live probe — only includes agents that are actually installed.
+        // Use GET /v1/agents to see all candidates and why missing ones aren't.
+        agents: agents.filter((a) => a.installed).map((a) => a.id),
+        auth: config.token ? 'bearer' : 'none',
+      },
+    }
+  })
 
   const sessionStore = new SessionStore(db)
   const eventStore = new EventStore(db)
@@ -75,6 +82,7 @@ async function main() {
   registerEventRoutes(app, { sessionStore, eventStore, bus })
   registerPromptRoutes(app, { sessionStore, supervisor })
   registerProjectRoutes(app, { projectStore })
+  registerAgentRoutes(app)
 
   const shutdown = async () => {
     try {
