@@ -25,7 +25,8 @@ export function registerProjectRoutes(app: FastifyInstance, deps: ProjectsDeps) 
     return { projects: deps.projectStore.list() }
   })
 
-  app.put<{
+  // POST upserts by directory; idempotent — re-POSTing bumps updated_at.
+  app.post<{
     Body: { directory?: unknown; name?: unknown }
   }>('/v1/projects', async (req, reply) => {
     const directory = validateDirectory(req.body?.directory)

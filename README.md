@@ -67,9 +67,22 @@ Then:
 ```bash
 curl http://localhost:2468/v1/health
 curl http://localhost:2468/v1/meta
-curl -X POST http://localhost:2468/v1/sessions \
+
+# create a session
+SID=$(curl -s -X POST http://localhost:2468/v1/sessions \
   -H 'content-type: application/json' \
-  -d '{"agent":"echo","cwd":"/tmp"}'
+  -d '{"agent":"echo","cwd":"/tmp"}' | jq -r .id)
+
+# subscribe to events (separate terminal)
+curl -N http://localhost:2468/v1/sessions/$SID/events/stream
+
+# send a prompt
+curl -X POST http://localhost:2468/v1/sessions/$SID/message \
+  -H 'content-type: application/json' \
+  -d '{"content":[{"type":"text","text":"hi"}]}'
+
+# abort an in-flight turn
+curl -X POST http://localhost:2468/v1/sessions/$SID/abort
 ```
 
 ## Smoke test

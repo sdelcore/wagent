@@ -66,7 +66,7 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionsDeps) 
     return session
   })
 
-  app.put<{
+  app.patch<{
     Params: { id: string }
     Body: { alias?: string | null; model?: string | null }
   }>('/v1/sessions/:id', async (req, reply) => {

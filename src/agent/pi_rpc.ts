@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import type { AgentFactory, AgentProcess, AgentSpawnDeps } from './process.js'
 import type {
   ContentBlock as WireContent,
-  PermissionReply,
+  PermissionOutcome,
   Session,
   SessionUpdate,
 } from '../types.js'
@@ -194,7 +194,7 @@ class PiRpcAgent implements AgentProcess {
     this.send({ type: 'abort' })
   }
 
-  async respondPermission(_requestId: string, _reply: PermissionReply): Promise<void> {
+  async respondPermission(_requestId: string, _outcome: PermissionOutcome): Promise<void> {
     // Pi does not surface permission requests — no-op.
   }
 

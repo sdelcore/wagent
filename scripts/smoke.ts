@@ -170,7 +170,7 @@ async function smokeAgent(agent: string): Promise<SmokeResult> {
   await sleep(150)
 
   // 3. send prompt
-  const prompt = await fetch(`${BASE}/v1/sessions/${sessionId}/prompts`, {
+  const prompt = await fetch(`${BASE}/v1/sessions/${sessionId}/message`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({

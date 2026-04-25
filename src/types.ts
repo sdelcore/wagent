@@ -45,7 +45,9 @@ export interface EventEnvelope {
   payload: SessionUpdate
 }
 
-export type PermissionReply = 'always' | 'once' | 'reject'
+// ACP wire vocabulary — `allow_always` / `allow_once` / `reject`.
+// Used in both the wire (request body) and the SessionUpdate payload.
+export type PermissionOutcome = 'allow_always' | 'allow_once' | 'reject'
 
 export interface PermissionRequest {
   requestId: string
@@ -54,7 +56,7 @@ export interface PermissionRequest {
     title?: string
     name?: string
   }
-  availableReplies: PermissionReply[]
+  availableOutcomes: PermissionOutcome[]
 }
 
 export interface ApiError {

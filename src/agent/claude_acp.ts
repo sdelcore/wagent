@@ -8,7 +8,7 @@ import type {
 } from './process.js'
 import type {
   ContentBlock as WireContent,
-  PermissionReply,
+  PermissionOutcome,
   Session,
   SessionUpdate,
 } from '../types.js'
@@ -16,7 +16,7 @@ import type {
 // Resolver registered while the agent's requestPermission is awaiting.
 interface PendingPermission {
   resolve(response: acp.RequestPermissionResponse): void
-  optionByReply: Partial<Record<PermissionReply, string>>
+  optionByOutcome: Partial<Record<PermissionOutcome, string>>
   toolCallId: string
 }
 
@@ -76,26 +76,23 @@ class ClaudeAcpAgent implements AgentProcess {
     }
   }
 
-  async respondPermission(requestId: string, reply: PermissionReply): Promise<void> {
+  async respondPermission(requestId: string, outcome: PermissionOutcome): Promise<void> {
     const pending = this.pending.get(requestId)
     if (!pending) return // idempotent — already resolved
     this.pending.delete(requestId)
-    if (reply === 'reject') {
-      const optionId = pending.optionByReply.reject
-      if (optionId) {
-        pending.resolve({ outcome: { outcome: 'selected', optionId } })
-      } else {
-        pending.resolve({ outcome: { outcome: 'cancelled' } })
-      }
+    const optionId =
+      pending.optionByOutcome[outcome] ??
+      // Fall back to the "once" variant if the requested outcome isn't
+      // offered for this particular tool call (some ACP servers only
+      // expose one of allow_always / allow_once).
+      pending.optionByOutcome.allow_once ??
+      pending.optionByOutcome.reject
+    if (optionId) {
+      pending.resolve({ outcome: { outcome: 'selected', optionId } })
     } else {
-      const optionId = pending.optionByReply[reply] ?? pending.optionByReply.once
-      if (optionId) {
-        pending.resolve({ outcome: { outcome: 'selected', optionId } })
-      } else {
-        pending.resolve({ outcome: { outcome: 'cancelled' } })
-      }
+      pending.resolve({ outcome: { outcome: 'cancelled' } })
     }
-    this.deps.emit({ kind: 'permission_resolved', requestId, reply })
+    this.deps.emit({ kind: 'permission_resolved', requestId, outcome })
   }
 
   async close(): Promise<void> {
@@ -110,14 +107,14 @@ class ClaudeAcpAgent implements AgentProcess {
   // Called by the Client implementation when the agent asks for permission.
   registerPending(toolCallId: string, options: acp.PermissionOption[]): Promise<acp.RequestPermissionResponse> {
     const requestId = toolCallId
-    const optionByReply = mapOptionsToReplies(options)
+    const optionByOutcome = mapOptionsToOutcomes(options)
     return new Promise<acp.RequestPermissionResponse>((resolve) => {
-      this.pending.set(requestId, { resolve, optionByReply, toolCallId })
+      this.pending.set(requestId, { resolve, optionByOutcome, toolCallId })
       this.deps.emit({
         kind: 'permission_request',
         requestId,
         toolCall: { toolCallId },
-        availableReplies: Object.keys(optionByReply) as PermissionReply[],
+        availableOutcomes: Object.keys(optionByOutcome) as PermissionOutcome[],
       })
     })
   }
@@ -130,19 +127,20 @@ class ClaudeAcpAgent implements AgentProcess {
   }
 }
 
-// Map ACP option kinds to wagent's PermissionReply triple.
-// ACP options have `kind: "allow_once" | "allow_always" | "reject_once" | "reject_always"`
-function mapOptionsToReplies(
+// Map ACP option kinds to wagent's PermissionOutcome triple. ACP option
+// kinds: "allow_once" | "allow_always" | "reject_once" | "reject_always".
+// We collapse both reject variants into a single `reject` outcome.
+function mapOptionsToOutcomes(
   options: acp.PermissionOption[],
-): Partial<Record<PermissionReply, string>> {
-  const out: Partial<Record<PermissionReply, string>> = {}
+): Partial<Record<PermissionOutcome, string>> {
+  const out: Partial<Record<PermissionOutcome, string>> = {}
   for (const opt of options) {
     switch (opt.kind) {
       case 'allow_always':
-        out.always = opt.optionId
+        out.allow_always = opt.optionId
         break
       case 'allow_once':
-        out.once = opt.optionId
+        out.allow_once = opt.optionId
         break
       case 'reject_once':
       case 'reject_always':

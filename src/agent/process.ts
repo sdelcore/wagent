@@ -1,6 +1,6 @@
 import type {
   ContentBlock,
-  PermissionReply,
+  PermissionOutcome,
   Session,
   SessionUpdate,
 } from '../types.js'
@@ -19,7 +19,7 @@ import type {
 export interface AgentProcess {
   prompt(content: ContentBlock[]): Promise<void>
   cancel(): Promise<void>
-  respondPermission(requestId: string, reply: PermissionReply): Promise<void>
+  respondPermission(requestId: string, outcome: PermissionOutcome): Promise<void>
   close(): Promise<void>
 }
 

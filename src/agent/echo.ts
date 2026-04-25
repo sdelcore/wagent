@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { AgentFactory, AgentProcess, AgentSpawnDeps } from './process.js'
-import type { ContentBlock, PermissionReply, Session } from '../types.js'
+import type { ContentBlock, PermissionOutcome, Session } from '../types.js'
 
 // A stub agent for end-to-end testing without spawning a real coding agent.
 // On every prompt it:
@@ -55,7 +55,7 @@ class EchoAgent implements AgentProcess {
     this.cancelled = true
   }
 
-  async respondPermission(_requestId: string, _reply: PermissionReply): Promise<void> {
+  async respondPermission(_requestId: string, _outcome: PermissionOutcome): Promise<void> {
     // Echo agent never asks for permission.
   }
 

@@ -19,15 +19,21 @@
 │  wagent (Node + TS, single process per host)                │
 ├─────────────────────────────────────────────────────────────┤
 │  Fastify HTTP routes                                        │
-│    GET  /v1/health                                          │
-│    GET  /v1/meta                                            │
-│    GET  /v1/agents                                          │
-│    GET/POST/PUT/DELETE /v1/sessions[/:id]                   │
-│    GET  /v1/sessions/:id/events  (SSE)                      │
-│    POST /v1/sessions/:id/prompts                            │
-│    POST /v1/sessions/:id/cancel                             │
-│    POST /v1/sessions/:id/permissions                        │
-│    GET/PUT/DELETE /v1/projects                              │
+│    GET    /v1/health                                        │
+│    GET    /v1/meta                                          │
+│    GET    /v1/sessions[?destroyed=true]                     │
+│    POST   /v1/sessions                                      │
+│    GET    /v1/sessions/:id                                  │
+│    PATCH  /v1/sessions/:id           (alias, model)         │
+│    DELETE /v1/sessions/:id                                  │
+│    GET    /v1/sessions/:id/events    (paged JSON history)   │
+│    GET    /v1/sessions/:id/events/stream  (SSE)             │
+│    POST   /v1/sessions/:id/message                          │
+│    POST   /v1/sessions/:id/abort                            │
+│    POST   /v1/sessions/:id/permissions/:requestId           │
+│    GET    /v1/projects                                      │
+│    POST   /v1/projects                (upsert)              │
+│    DELETE /v1/projects?directory=...                        │
 ├─────────────────────────────────────────────────────────────┤
 │  Subprocess supervisor                                      │
 │    interface AgentProcess                                   │
@@ -74,7 +80,10 @@ data: {"kind":"agent_message_chunk","sessionId":"...","eventIndex":42,
 
 `kind` is one of: `agent_message_chunk`, `agent_thought_chunk`,
 `tool_call`, `tool_call_update`, `plan`, `user_message_chunk`,
-`permission_request`, `stop`. Stable v1 contract.
+`permission_request`, `permission_resolved`, `stop`. Stable v1 contract.
+
+Permission outcomes use ACP wire vocabulary:
+`allow_always` / `allow_once` / `reject`.
 
 Internal (wagent ↔ subprocess):
 
@@ -89,15 +98,29 @@ Normalizer fan-in means routes only see our `SessionUpdate` shape.
 1. Client `POST /v1/sessions { agent, cwd, model? }`.
 2. wagent allocates an id, persists a row, spawns the subprocess, sends
    `initialize` (ACP) or equivalent.
-3. Client `POST /v1/sessions/:id/prompts` and subscribes to
-   `/v1/sessions/:id/events` over SSE.
+3. Client `POST /v1/sessions/:id/message` and subscribes to
+   `/v1/sessions/:id/events/stream` over SSE.
 4. Subprocess emits ACP/RPC events → normalizer → SQLite append +
    broadcast → SSE consumers see them live.
 5. Client disconnects: subprocess **stays alive**. SQLite keeps the
    event log. New connection picks up via `Last-Event-ID`.
-6. `POST /v1/sessions/:id/cancel` interrupts the current turn.
+6. `POST /v1/sessions/:id/abort` interrupts the current turn.
 7. `DELETE /v1/sessions/:id` ends and removes the session (cascades
-   events). No soft delete.
+   events).
+
+## API alignment
+
+- REST verb/noun shape mirrors **OpenCode's** `/session` API
+  (`POST /v1/sessions`, `POST /v1/sessions/:id/message`,
+  `POST /v1/sessions/:id/abort`, `PATCH /v1/sessions/:id`).
+- Permission vocabulary uses **ACP** wire terms (`allow_always` /
+  `allow_once` / `reject`).
+- Per-session SSE + `Last-Event-ID` resume + monotonic `eventIndex` +
+  paged history endpoint — these are wagent-specific advantages over
+  both references and not part of either's design.
+- Not chasing ACP's draft Streamable-HTTP transport (`/acp` single-
+  endpoint, JSON-RPC envelopes) until the RFD merges and a reference
+  server ships.
 
 ## Auth
 
