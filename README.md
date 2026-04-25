@@ -98,6 +98,79 @@ Boots the server in-process with a temp SQLite, creates a session per
 agent, opens an SSE stream, sends a prompt, asserts a `stop` event
 arrives with monotonic event indices.
 
+## Deployment (NixOS)
+
+The flake exposes `nixosModules.default`. The module wires up a systemd
+service, user, and state directory but **does not bundle wagent into
+the Nix store** — better-sqlite3's prebuild-install fights every
+buildNpmPackage / mkDerivation approach (V8 ABI mismatch). You install
+wagent yourself on the host; the module runs it.
+
+```nix
+# In your flake.nix:
+inputs.wagent.url = "github:sdelcore/wagent";
+
+# In your NixOS config:
+imports = [ inputs.wagent.nixosModules.default ];
+
+services.wagent = {
+  enable = true;
+  host = "0.0.0.0";              # or "127.0.0.1" for loopback only
+  port = 2468;
+  cors = "https://droidcode.example.ts.net";
+  openFirewall = true;
+  environmentFile = "/run/agenix/wagent.env";  # WAGENT_TOKEN, ANTHROPIC_API_KEY
+};
+```
+
+Then on the host (one-time install, repeat on version bumps):
+
+```bash
+sudo -u wagent -i
+cd /var/lib/wagent
+mkdir -p install && cd install
+# Option A — install from a `npm pack` tarball you scp'd over:
+npm install /tmp/wagent-0.1.0.tgz
+# Option B — install from a GitHub release:
+npm install https://github.com/sdelcore/wagent/releases/download/v0.1.0/wagent-0.1.0.tgz
+# Option C — point at a checkout:
+ln -s ~/src/wagent /var/lib/wagent/install/node_modules/wagent
+sudo systemctl start wagent
+```
+
+`services.wagent.binary` defaults to
+`/var/lib/wagent/install/node_modules/.bin/wagent`. Override if you
+install elsewhere.
+
+## Deployment (non-NixOS)
+
+```bash
+npm install -g ./wagent-0.1.0.tgz
+# or the GH release tarball URL.
+```
+
+Then write a systemd user unit (or run from your shell):
+
+```ini
+# ~/.config/systemd/user/wagent.service
+[Unit]
+Description=wagent
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/env wagent
+Restart=on-failure
+Environment=WAGENT_HOST=127.0.0.1
+Environment=WAGENT_PORT=2468
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user enable --now wagent
+```
+
 ## Configuration
 
 | env | default | purpose |
