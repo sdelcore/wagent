@@ -23,6 +23,8 @@
   },
   "homepage": "https://github.com/sdelcore/wagent#readme",
   "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "^0.31.0",
+    "@agentclientprotocol/sdk": "^0.20.0",
     "@fastify/cors": "^11.0.1",
     "better-sqlite3": "^11.10.0",
     "fastify": "^5.6.1"

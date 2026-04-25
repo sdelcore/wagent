@@ -7,6 +7,7 @@ import { EventStore } from './events/store.js'
 import { SessionBus } from './bus.js'
 import { AgentSupervisor } from './agent/supervisor.js'
 import { echoFactory } from './agent/echo.js'
+import { claudeAcpFactory } from './agent/claude_acp.js'
 import { registerSessionRoutes } from './routes/sessions.js'
 import { registerEventRoutes } from './routes/events.js'
 import { registerPromptRoutes } from './routes/prompts.js'
@@ -45,7 +46,7 @@ async function main() {
     hostname: config.hostname,
     home: config.home,
     capabilities: {
-      agents: ['echo'] as string[], // echo always; claude/pi added when adapters land
+      agents: ['echo', 'claude'] as string[],
       auth: config.token ? 'bearer' : 'none',
     },
   }))
@@ -61,7 +62,8 @@ async function main() {
     log: app.log,
     factories: {
       echo: echoFactory,
-      // claude + pi added when adapters land
+      claude: claudeAcpFactory,
+      // pi adapter lands next commit
     },
   })
 
