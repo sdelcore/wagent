@@ -15,6 +15,7 @@ import { registerEventRoutes } from './routes/events.js'
 import { registerPromptRoutes } from './routes/prompts.js'
 import { registerProjectRoutes } from './routes/projects.js'
 import { registerAgentRoutes } from './routes/agents.js'
+import { registerFsRoutes } from './routes/fs.js'
 import { probeAll } from './agent/availability.js'
 
 const VERSION = '0.1.0'
@@ -83,6 +84,7 @@ async function main() {
   registerPromptRoutes(app, { sessionStore, supervisor })
   registerProjectRoutes(app, { projectStore })
   registerAgentRoutes(app)
+  registerFsRoutes(app)
 
   const shutdown = async () => {
     try {
