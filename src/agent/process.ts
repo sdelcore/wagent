@@ -20,11 +20,20 @@ export interface AgentProcess {
   prompt(content: ContentBlock[]): Promise<void>
   cancel(): Promise<void>
   respondPermission(requestId: string, outcome: PermissionOutcome): Promise<void>
+  // Optional — called by the route layer on PATCH /v1/sessions/:id when
+  // the model field changes. Adapters that can hot-switch implement it;
+  // others can no-op (the DB still reflects the new model for next spawn).
+  setModel?(model: string): Promise<void>
   close(): Promise<void>
 }
 
 export interface AgentSpawnDeps {
   emit(update: SessionUpdate): void
+  // Adapters call this when the underlying subprocess exits unexpectedly
+  // (i.e. not via close()). Supervisor uses it to remove the dead handle
+  // so the next prompt respawns cleanly, and emits a `subprocess_died`
+  // event so clients can show a recover state.
+  markDead(reason: string): void
   // Supervisor passes a logger so adapters can use the existing pino instance.
   log: {
     info(obj: object, msg?: string): void

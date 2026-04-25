@@ -29,6 +29,7 @@ interface PiEvent {
 class PiRpcAgent implements AgentProcess {
   private nextId = 1
   private currentMessageId: string | null = null
+  private closing = false
 
   // Pending responses by request id.
   private readonly pending = new Map<
@@ -198,14 +199,24 @@ class PiRpcAgent implements AgentProcess {
     // Pi does not surface permission requests — no-op.
   }
 
-  async setModel(provider: string, modelId: string): Promise<void> {
+  async setModelByPair(provider: string, modelId: string): Promise<void> {
     const resp = await this.request('set_model', { provider, modelId })
     if (!resp.success) {
       this.deps.log.warn({ provider, modelId, error: resp.error }, 'pi set_model failed')
     }
   }
 
+  // AgentProcess.setModel — accepts the same "provider:modelId" string
+  // shape that POST /v1/sessions takes. Bare value goes to anthropic.
+  async setModel(model: string): Promise<void> {
+    const parts = model.split(':')
+    const provider = parts.length > 1 ? (parts[0] ?? 'anthropic') : 'anthropic'
+    const modelId = parts.length > 1 ? parts.slice(1).join(':') : (parts[0] ?? '')
+    if (modelId) await this.setModelByPair(provider, modelId)
+  }
+
   async close(): Promise<void> {
+    this.closing = true
     try {
       this.child.kill('SIGTERM')
     } catch {}
@@ -227,11 +238,16 @@ export const piRpcFactory: AgentFactory = {
       if (line) deps.log.info({ stream: 'stderr' }, line)
     })
 
+    const agent = new PiRpcAgent(child, deps)
+
     child.on('exit', (code, signal) => {
       deps.log.warn({ code, signal }, 'pi exited')
+      // Reach into the agent's closing flag so we don't markDead on a
+      // graceful close().
+      if (!(agent as unknown as { closing: boolean }).closing) {
+        deps.markDead(`pi exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`)
+      }
     })
-
-    const agent = new PiRpcAgent(child, deps)
 
     // LF-only line splitter — `readline` would mishandle U+2028/U+2029
     // inside JSON payloads per pi's framing rules.
@@ -249,14 +265,7 @@ export const piRpcFactory: AgentFactory = {
     })
 
     // Optional model override at startup. Pi's set_model is best-effort.
-    // Convention: model is "provider:modelId" (e.g. "anthropic:claude-sonnet-4");
-    // bare value is treated as the modelId on the default anthropic provider.
-    if (session.model) {
-      const parts = session.model.split(':')
-      const provider = parts.length > 1 ? (parts[0] ?? 'anthropic') : 'anthropic'
-      const modelId = parts.length > 1 ? parts.slice(1).join(':') : (parts[0] ?? '')
-      if (modelId) void agent.setModel(provider, modelId)
-    }
+    if (session.model) void agent.setModel(session.model)
 
     return agent
   },

@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import type { SessionStore } from '../sessions/store.js'
+import type { EventStore } from '../events/store.js'
 import type { SessionBus } from '../bus.js'
 import type { AgentSupervisor } from '../agent/supervisor.js'
 import { probeAgent } from '../agent/availability.js'
@@ -23,6 +24,7 @@ function validateCwd(cwd: unknown): string | null {
 
 export interface SessionsDeps {
   sessionStore: SessionStore
+  eventStore: EventStore
   bus: SessionBus
   supervisor: AgentSupervisor
 }
@@ -84,17 +86,48 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionsDeps) 
     Body: { alias?: string | null; model?: string | null }
   }>('/v1/sessions/:id', async (req, reply) => {
     const body = req.body ?? {}
+    const before = store.get(req.params.id)
+    if (!before) return bad(reply, 404, 'not_found', `session ${req.params.id} not found`)
+
     const updated = store.update(req.params.id, {
       alias: body.alias === undefined ? undefined : body.alias,
       model: body.model === undefined ? undefined : body.model,
     })
     if (!updated) return bad(reply, 404, 'not_found', `session ${req.params.id} not found`)
+
+    // Propagate model change to the live subprocess if there is one.
+    // No process running = nothing to do; next prompt picks up the new
+    // model at spawn time.
+    if (
+      body.model !== undefined &&
+      typeof body.model === 'string' &&
+      body.model !== before.model
+    ) {
+      const proc = deps.supervisor.get(req.params.id)
+      if (proc?.setModel) {
+        proc.setModel(body.model).catch((err) => {
+          app.log.warn({ err, sessionId: req.params.id }, 'live setModel failed')
+        })
+      }
+    }
+
     return updated
   })
 
   app.delete<{ Params: { id: string } }>('/v1/sessions/:id', async (req, reply) => {
     const id = req.params.id
     if (!store.get(id)) return bad(reply, 404, 'not_found', `session ${id} not found`)
+    // Emit a session_destroyed event BEFORE the cascade so any open SSE
+    // consumers see a graceful close marker rather than a bare TCP RST.
+    try {
+      const event = deps.eventStore.append(id, { kind: 'session_destroyed' })
+      deps.bus.publish(event)
+      // Tiny grace period so the broadcaster delivers before we drop
+      // listeners. Doesn't block destroy if a consumer is slow.
+      await new Promise((r) => setTimeout(r, 50))
+    } catch (err) {
+      app.log.warn({ err, sessionId: id }, 'failed to emit session_destroyed')
+    }
     // Close the running subprocess first so it can't append events
     // after the session row is gone (FK would reject anyway, but the
     // close is the right semantic).

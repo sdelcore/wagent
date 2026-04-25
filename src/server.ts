@@ -78,7 +78,7 @@ async function main() {
     },
   })
 
-  registerSessionRoutes(app, { sessionStore, bus, supervisor })
+  registerSessionRoutes(app, { sessionStore, eventStore, bus, supervisor })
   registerEventRoutes(app, { sessionStore, eventStore, bus })
   registerPromptRoutes(app, { sessionStore, supervisor })
   registerProjectRoutes(app, { projectStore })

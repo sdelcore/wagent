@@ -30,6 +30,8 @@ export type SessionUpdateKind =
   | 'permission_request'
   | 'permission_resolved'
   | 'stop'
+  | 'subprocess_died'
+  | 'session_destroyed'
 
 export interface SessionUpdate {
   kind: SessionUpdateKind

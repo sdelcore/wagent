@@ -46,6 +46,18 @@ export class AgentSupervisor {
           const event = this.deps.eventStore.append(sessionId, update)
           this.deps.bus.publish(event)
         },
+        markDead: (reason) => {
+          // Subprocess exited unexpectedly. Drop the handle so the
+          // next prompt respawns; emit an event so clients render a
+          // "agent crashed, send a prompt to restart" affordance.
+          this.processes.delete(sessionId)
+          const event = this.deps.eventStore.append(sessionId, {
+            kind: 'subprocess_died',
+            reason,
+          })
+          this.deps.bus.publish(event)
+          this.deps.log.warn({ sessionId, reason }, 'agent subprocess died unexpectedly')
+        },
       })
       this.processes.set(sessionId, proc)
       return proc

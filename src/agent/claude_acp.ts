@@ -23,6 +23,7 @@ interface PendingPermission {
 class ClaudeAcpAgent implements AgentProcess {
   private readonly pending = new Map<string, PendingPermission>()
   private currentPromptAborter: AbortController | null = null
+  private closing = false
 
   constructor(
     private readonly child: ChildProcess,
@@ -38,6 +39,11 @@ class ClaudeAcpAgent implements AgentProcess {
         p.resolve({ outcome: { outcome: 'cancelled' } })
       }
       this.pending.clear()
+      if (!this.closing) {
+        this.deps.markDead(
+          `claude-agent-acp exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`,
+        )
+      }
     })
   }
 
@@ -95,7 +101,24 @@ class ClaudeAcpAgent implements AgentProcess {
     this.deps.emit({ kind: 'permission_resolved', requestId, outcome })
   }
 
+  async setModel(model: string): Promise<void> {
+    // claude-agent-acp exposes setSessionModel under unstable_; the
+    // SDK wraps it. Best-effort — failures don't poison the session.
+    try {
+      const fn = (this.conn as { unstable_setSessionModel?: (p: { sessionId: string; modelId: string }) => Promise<unknown> })
+        .unstable_setSessionModel
+      if (typeof fn === 'function') {
+        await fn.call(this.conn, { sessionId: this.sessionId, modelId: model })
+      } else {
+        this.deps.log.warn({ model }, 'claude-agent-acp: setSessionModel not available')
+      }
+    } catch (err) {
+      this.deps.log.warn({ err, model }, 'claude setModel failed')
+    }
+  }
+
   async close(): Promise<void> {
+    this.closing = true
     try {
       this.currentPromptAborter?.abort()
     } catch {}
