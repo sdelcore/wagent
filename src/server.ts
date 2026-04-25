@@ -2,6 +2,8 @@ import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import { loadConfig } from './config.js'
 import { openDatabase } from './db.js'
+import { SessionStore } from './sessions/store.js'
+import { registerSessionRoutes } from './routes/sessions.js'
 
 const VERSION = '0.1.0'
 
@@ -37,11 +39,13 @@ async function main() {
     hostname: config.hostname,
     home: config.home,
     capabilities: {
-      // Filled in as adapters land. Kept conservative on day 0.
-      agents: [] as string[],
+      agents: ['echo'] as string[], // echo always; claude/pi added when adapters land
       auth: config.token ? 'bearer' : 'none',
     },
   }))
+
+  const sessionStore = new SessionStore(db)
+  registerSessionRoutes(app, sessionStore)
 
   const shutdown = async () => {
     try {
