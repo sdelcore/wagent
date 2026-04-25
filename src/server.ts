@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import { loadConfig } from './config.js'
@@ -18,7 +20,9 @@ import { registerAgentRoutes } from './routes/agents.js'
 import { registerFsRoutes } from './routes/fs.js'
 import { probeAll } from './agent/availability.js'
 
-const VERSION = '0.1.0'
+const PKG_PATH = fileURLToPath(new URL('../package.json', import.meta.url))
+const PKG = JSON.parse(readFileSync(PKG_PATH, 'utf8')) as { version: string }
+const VERSION = PKG.version
 
 async function main() {
   const config = loadConfig()
