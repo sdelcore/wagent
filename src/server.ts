@@ -4,6 +4,7 @@ import { loadConfig } from './config.js'
 import { openDatabase } from './db.js'
 import { SessionStore } from './sessions/store.js'
 import { EventStore } from './events/store.js'
+import { ProjectStore } from './projects/store.js'
 import { SessionBus } from './bus.js'
 import { AgentSupervisor } from './agent/supervisor.js'
 import { echoFactory } from './agent/echo.js'
@@ -12,6 +13,7 @@ import { piRpcFactory } from './agent/pi_rpc.js'
 import { registerSessionRoutes } from './routes/sessions.js'
 import { registerEventRoutes } from './routes/events.js'
 import { registerPromptRoutes } from './routes/prompts.js'
+import { registerProjectRoutes } from './routes/projects.js'
 
 const VERSION = '0.1.0'
 
@@ -54,6 +56,7 @@ async function main() {
 
   const sessionStore = new SessionStore(db)
   const eventStore = new EventStore(db)
+  const projectStore = new ProjectStore(db)
   const bus = new SessionBus()
 
   const supervisor = new AgentSupervisor({
@@ -71,6 +74,7 @@ async function main() {
   registerSessionRoutes(app, { sessionStore, bus, supervisor })
   registerEventRoutes(app, { sessionStore, eventStore, bus })
   registerPromptRoutes(app, { sessionStore, supervisor })
+  registerProjectRoutes(app, { projectStore })
 
   const shutdown = async () => {
     try {
