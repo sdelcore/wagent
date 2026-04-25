@@ -2,7 +2,24 @@
 
 Log of key decisions, most recent first. Each entry: what was decided, what alternative was rejected, and the reason.
 
+## 2026-04-25 — Reverse 2026-04-16: build wagent as our own daemon, drop Rivet
+
+**Decision:** Build wagent as a Node + TypeScript daemon (Fastify, better-sqlite3, child-process supervision) that exposes coding agents over HTTP+SSE. Spawn `claude-agent-acp` (Claude) and `pi --mode rpc` (pi) as long-lived per-session subprocesses. Stable v1 wire contract, bearer-token auth, single-binary-feel deployment.
+
+**Rejected:** The 2026-04-16 plan to deploy Rivet `sandbox-agent` unmodified.
+
+**Reason:** Months of integrating with Rivet from droidcode produced a 20-row [SDK_LIMITATIONS](https://github.com/sdelcore/droidcode/blob/main/docs/SDK_LIMITATIONS.md) doc. Five parallel research agents pressure-tested the choices and found that ~17 of the 20 are structural Rivet design choices, not bugs: client-side session persistence, soft delete, no real interrupt primitive, "resume" that re-spawns the subprocess and re-primes via a JSON replay prefix, silent SSE stalls on mobile, etc. A fork doesn't fix them without a rewrite, and Rivet's roadmap is on cloud-sandbox providers (E2B, Daytona, Modal), not the personal-PC always-on use case wagent targets.
+
+We already build a companion service in droidcode that does session listing, event mirroring, and projects — half the daemon's job. Owning the rest is cheaper than maintaining the workaround surface forever.
+
+**Implication:**
+- droidcode will eventually swap its `sandbox-agent` SDK use for a thin HTTP+SSE client against wagent. That work is separate (in droidcode's repo).
+- Multi-agent support narrows to **Claude + pi**. No Codex, OpenCode, or Amp adapters in v1.
+- The earlier Rust + learning-curriculum direction is also shelved (kept locally on the unpushed `rust-rewrite` branch). v1 ships in Node for speed.
+
 ## 2026-04-16 — Adopt Rivet `sandbox-agent` as the daemon unchanged
+
+> **Superseded 2026-04-25.** Original entry kept for context.
 
 **Decision:** Use Rivet's sandbox-agent binary as the host-side daemon. Do not fork, do not wrap, do not modify.
 

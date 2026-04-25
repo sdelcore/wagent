@@ -1,52 +1,85 @@
 # wagent
 
-Self-hosted, mobile-first control for coding agents across multiple personal PCs.
-
-## What this is
-
-A setup for running coding agents (Claude Code, OpenCode, Codex, Amp) on one or more of your own machines and controlling them from a phone, tablet, or laptop over the internet.
+Self-hosted daemon that runs coding agents on a host and exposes them over
+HTTP+SSE so any client (web, CLI, mobile) can drive them remotely.
 
 Not a product. Not multi-tenant. One user, many devices.
 
-## How it works
+## What it is
 
-- **Each PC** runs [Rivet `sandbox-agent`](https://github.com/rivet-dev/sandbox-agent) as a systemd user service. It spawns and manages agent subprocesses, exposes HTTP + SSE, and normalizes events across harnesses.
-- **Each client** (phone, laptop) runs a PWA that uses the `sandbox-agent` TypeScript SDK directly. IndexedDB for session persistence. Aggregates multiple hosts into one view.
-- **Connectivity** is Tailscale. No inbound ports, no custom relay.
-- **Environments** are reproducible via Nix flakes per host and per project.
+A small Node + TypeScript service that:
 
-The daemon is unmodified Rivet. We don't build or fork it. The PWA (a transition target for [droidcode](https://github.com/sdelcore/droidcode)) is the only thing we build.
+- Spawns and supervises coding-agent subprocesses on the host
+  (Claude via [`@agentclientprotocol/claude-agent-acp`](https://www.npmjs.com/package/@agentclientprotocol/claude-agent-acp),
+  pi via [`pi --mode rpc`](https://github.com/badlogic/pi-mono)).
+- Speaks JSON over HTTP for control + Server-Sent Events for streaming.
+- Persists sessions and event history in SQLite so reconnecting clients
+  don't lose state.
+- Handles permissions, cancellation, and per-session model switching.
+- Ships as a single Node entry point, packaged via Nix.
 
-## Why
+Replaces [Rivet `sandbox-agent`](https://github.com/rivet-dev/sandbox-agent)
+as the host-side daemon. The wire is wagent's own — clients talk to it
+directly without an intermediate SDK.
 
-- Mobile development while away from a desk.
-- Start agent sessions remotely, not just resume them.
-- Multiple PCs, multiple projects, multiple harnesses — one control plane.
-- Agent keeps working when the phone disconnects.
-- Host-direct execution so the agent can actually debug the machine it's running on.
+## Why not Rivet?
 
-See [docs/why.md](./docs/why.md) for the full motivation.
+Rivet is well-engineered but optimized for cloud-sandbox deployment
+(E2B / Daytona / Modal). Using it for "personal-PC always-on daemon"
+piled up 20+ workarounds in [droidcode](https://github.com/sdelcore/droidcode)'s
+SDK_LIMITATIONS doc — most of them structural to Rivet's design (sessions
+are client-persisted, resume re-spawns the subprocess and replays a JSON
+prefix, no real interrupt primitive, etc.). At that point we own enough
+of the integration that owning the daemon is cheaper than maintaining
+the workarounds. See [docs/decisions.md](./docs/decisions.md).
 
 ## Status
 
-Pre-v0. This repo currently contains:
-
-- `flake.nix` — Nix dev shell (Node 22)
-- `src/test.ts` — smoke test using the Rivet TS SDK in embedded mode
-- `docs/` — architecture, setup, decisions
-- `docs/droidcode-migration.md` — guide for adapting droidcode to use the Rivet SDK instead of the OpenCode API
-
-Client PWA is not yet written. Starting point is the existing [droidcode](https://github.com/sdelcore/droidcode) React Native app, which will migrate to Next.js + Tauri per droidcode's own migration plan.
+**v0.1 — scaffold.** Fastify server with `/v1/health` and `/v1/meta`,
+SQLite schema for sessions + events + projects. Subprocess adapters
+(`claude-agent-acp`, `pi --mode rpc`) and the prompt/cancel/permission
+endpoints land in subsequent commits.
 
 ## Quick start
 
 ```bash
 cd ~/src/wagent
-direnv allow
+direnv allow            # nix flake → node 22 + sandbox-agent on PATH (legacy, will drop)
 npm install
-npm test    # runs src/test.ts against Claude
+npm run dev             # tsx watch, Fastify on :2468
 ```
 
-Requires `ANTHROPIC_API_KEY` or a logged-in Claude install at `~/.claude/.credentials.json`.
+Then:
 
-Full host setup: [docs/setup.md](./docs/setup.md).
+```bash
+curl http://localhost:2468/v1/health
+curl http://localhost:2468/v1/meta
+```
+
+## Configuration
+
+| env | default | purpose |
+|---|---|---|
+| `WAGENT_HOST` | `0.0.0.0` | listen host |
+| `WAGENT_PORT` | `2468` | listen port (same as Rivet for drop-in compatibility during migration) |
+| `WAGENT_DB` | `~/.local/share/wagent/wagent.sqlite` | SQLite path |
+| `WAGENT_TOKEN` | *(unset)* | bearer token; clients send `Authorization: Bearer <token>` |
+| `WAGENT_CORS` | `*` | comma-separated origin allowlist for the daemon's HTTP API |
+| `LOG_LEVEL` | `info` | Fastify logger level |
+
+## Repo
+
+```
+src/
+  server.ts        Fastify entry, routes, lifecycle
+  config.ts        env parsing
+  db.ts            better-sqlite3 + schema
+  (agent/, http/, etc. — land in upcoming commits)
+docs/
+  why.md, setup.md, nixos-setup.md, architecture.md, decisions.md
+flake.nix          Nix dev shell — node 22, packages sandbox-agent (transition only)
+```
+
+## License
+
+MIT.

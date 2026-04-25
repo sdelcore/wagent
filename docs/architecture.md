@@ -1,115 +1,126 @@
 # Architecture
 
-## Current shape
+> **Direction reversed 2026-04-25:** wagent is now the daemon, not a
+> Rivet wrapper. The earlier "Rivet unmodified + PWA only" architecture
+> is preserved in commit `828fb6f` for context.
+
+## Shape
 
 ```
-┌─────────────────────┐
-│   PWA (client)      │   Runs in browser on phone/laptop/tablet
-│  - droidcode-PWA    │   Uses Rivet TS SDK directly
-│  - IndexedDB persist│   Aggregates N hosts
-└──────────┬──────────┘
-           │  HTTP + SSE over Tailscale
-           │
-  ┌────────┴────────┐  ┌────────────────┐  ┌────────────────┐
-  │  Host A (PC)    │  │  Host B (PC)   │  │  Host C (PC)   │
-  │ sandbox-agent   │  │ sandbox-agent  │  │ sandbox-agent  │
-  │ (systemd)       │  │ (systemd)      │  │ (systemd)      │
-  │                 │  │                │  │                │
-  │ spawns:         │  │                │  │                │
-  │  claude, codex, │  │                │  │                │
-  │  opencode ...   │  │                │  │                │
-  └─────────────────┘  └────────────────┘  └────────────────┘
+┌─────────────────────────────┐
+│  Client(s)                  │   droidcode web, CLI scripts, future
+│  - HTTP + SSE               │   tools. None are special-cased in
+│  - Bearer-token auth        │   wagent — the wire is the contract.
+└────────────┬────────────────┘
+             │
+             │  HTTP + SSE  (Tailscale or LAN; loopback for solo dev)
+             │
+┌────────────┴────────────────────────────────────────────────┐
+│  wagent (Node + TS, single process per host)                │
+├─────────────────────────────────────────────────────────────┤
+│  Fastify HTTP routes                                        │
+│    GET  /v1/health                                          │
+│    GET  /v1/meta                                            │
+│    GET  /v1/agents                                          │
+│    GET/POST/PUT/DELETE /v1/sessions[/:id]                   │
+│    GET  /v1/sessions/:id/events  (SSE)                      │
+│    POST /v1/sessions/:id/prompts                            │
+│    POST /v1/sessions/:id/cancel                             │
+│    POST /v1/sessions/:id/permissions                        │
+│    GET/PUT/DELETE /v1/projects                              │
+├─────────────────────────────────────────────────────────────┤
+│  Subprocess supervisor                                      │
+│    interface AgentProcess                                   │
+│      prompt / cancel / events / respondPermission / close   │
+│    impls:                                                   │
+│      ClaudeAcp — spawns claude-agent-acp, ACP JSON-RPC      │
+│      PiRpc     — spawns `pi --mode rpc`, native JSON-RPC    │
+├─────────────────────────────────────────────────────────────┤
+│  Event normalizer                                           │
+│    Each adapter emits one internal SessionUpdate shape.     │
+│    ACP envelopes do not leak past this layer.               │
+├─────────────────────────────────────────────────────────────┤
+│  Persistence (better-sqlite3)                               │
+│    sessions, events (append-only), projects.                │
+│    WAL, foreign keys ON, single writer.                     │
+├─────────────────────────────────────────────────────────────┤
+│  Per-session broadcaster                                    │
+│    in-memory pub/sub. SSE handlers subscribe; reconnects    │
+│    replay from SQLite via `Last-Event-ID`.                  │
+└─────────────────────────────────────────────────────────────┘
+
+       on the same host:
+       ┌────────────────────────┐    ┌────────────────────────┐
+       │ claude-agent-acp child │    │ pi --mode rpc child    │
+       │ (per session)          │    │ (per session)          │
+       └────────────────────────┘    └────────────────────────┘
 ```
 
-## Components
+## Wire
 
-### Host daemon — Rivet `sandbox-agent` (unmodified)
+External (client ↔ wagent):
 
-Runs as a systemd user service on each PC. Exposes HTTP + SSE on localhost. Reachable from other devices over Tailscale.
+- HTTP+JSON for the control plane.
+- SSE for events. Each event carries an `id:` (monotonic per-session
+  index) and a typed `event:` name. Reconnects send `Last-Event-ID: N`
+  and the server replays from N+1 via SQLite.
 
-- Spawns agent subprocesses (Claude, Codex, OpenCode, Amp) on demand.
-- Normalizes events into a universal schema (`session.*`, `item.*`, `question.*`, `permission.*`).
-- Handles ACP protocol translation per agent.
-- No sandbox is imposed — when run on bare metal without a container, agents have host access (that's the point).
+```
+event: session_update
+id: 42
+data: {"kind":"agent_message_chunk","sessionId":"...","eventIndex":42,
+       "createdAt":1776889000000,"payload":{...}}
+```
 
-We do not modify or fork Rivet. We deploy it.
+`kind` is one of: `agent_message_chunk`, `agent_thought_chunk`,
+`tool_call`, `tool_call_update`, `plan`, `user_message_chunk`,
+`permission_request`, `stop`. Stable v1 contract.
 
-### Client — PWA using Rivet TS SDK
+Internal (wagent ↔ subprocess):
 
-Successor to the React Native droidcode. Runs in the browser.
+- `claude-agent-acp` — JSON-RPC over stdio per the ACP spec.
+- `pi --mode rpc` — pi's own newline-JSON commands (`prompt`, `steer`,
+  `abort`, `set_model`, `get_state`, …).
 
-- Imports the `sandbox-agent` npm package in the browser.
-- Connects to each host via `SandboxAgent.connect({ baseUrl })`.
-- Uses the SDK's built-in IndexedDB `SessionPersistDriver` for client-side persistence.
-- Aggregates sessions across hosts — the multi-host navigation lives here, not in the daemon.
+Normalizer fan-in means routes only see our `SessionUpdate` shape.
 
-The PWA is the only piece we actually build. Even then, it's adapting existing droidcode code.
+## Session lifecycle
 
-### Connectivity — Tailscale
+1. Client `POST /v1/sessions { agent, cwd, model? }`.
+2. wagent allocates an id, persists a row, spawns the subprocess, sends
+   `initialize` (ACP) or equivalent.
+3. Client `POST /v1/sessions/:id/prompts` and subscribes to
+   `/v1/sessions/:id/events` over SSE.
+4. Subprocess emits ACP/RPC events → normalizer → SQLite append +
+   broadcast → SSE consumers see them live.
+5. Client disconnects: subprocess **stays alive**. SQLite keeps the
+   event log. New connection picks up via `Last-Event-ID`.
+6. `POST /v1/sessions/:id/cancel` interrupts the current turn.
+7. `DELETE /v1/sessions/:id` ends and removes the session (cascades
+   events). No soft delete.
 
-Each host and client is on the tailnet. The daemon binds to its Tailscale IP; the PWA connects directly. No inbound port forwarding, no relay server, no NAT traversal to solve.
+## Auth
 
-### Nix — environment layer on each host
+Optional bearer token via `WAGENT_TOKEN`. Loopback solo-dev with no
+token is fine. Any non-loopback exposure (LAN / Tailnet) should set a
+token. Token is checked in a single `onRequest` hook before routes run.
 
-Each host has a Nix flake to pin:
+## Why this is not the Rivet shape
 
-- The sandbox-agent binary version.
-- Agent runtimes (Node for Claude-ACP, etc.).
-- Per-project `flake.nix` files the daemon activates before spawning an agent.
+| concern | Rivet | wagent |
+|---|---|---|
+| Session list | client-side persist driver | server-side SQLite, single source of truth |
+| Destroy | soft (records keep `destroyedAt`) | real DELETE, FK-cascades events |
+| Interrupt | `rawSend('session/cancel')` | first-class endpoint |
+| Resume | new subprocess + replay-prefix prompt | subprocess stays alive; SSE Last-Event-ID |
+| Mobile SSE stalls | client-only mitigation | server keep-alive + replay-on-resume |
+| CORS `*` | rejected by binary | Fastify owns it |
+| Two daemons to run | daemon + companion | one |
 
-Optional but recommended. Without it, reproducibility across machines is manual.
+## Out of scope (v1)
 
-## What we're not building
-
-- **A custom daemon.** Rivet covers it.
-- **A universal harness abstraction.** Rivet covers it.
-- **A wire protocol.** Rivet's event schema is adopted as-is.
-- **A persistence layer on the server.** SDK handles it client-side.
-- **Auth and session orchestration.** Rivet's bearer-token auth + the TS SDK's session lifecycle is sufficient for personal use.
-- **A native mobile app.** PWA is good enough and cross-platform.
-
-## Data flow — creating a new session from the phone
-
-1. PWA calls `sdk.createSession({ agent: "claude", cwd: "/home/me/src/project" })` against Host A.
-2. Rivet on Host A spawns the Claude ACP agent process in that directory.
-3. Event stream (SSE) flows back to the PWA.
-4. PWA stores events in IndexedDB as they arrive.
-5. Phone locks, network drops — agent keeps running on Host A.
-6. Phone unlocks, PWA reconnects with the last-seen event offset.
-7. Missed events flush in; live stream resumes.
-
-## Data flow — permission prompt
-
-1. Claude needs to run a shell command.
-2. Rivet emits `permission.requested` event.
-3. PWA renders an approval dialog.
-4. User taps "allow once" / "allow always" / "reject".
-5. PWA calls `session.respondPermission(id, reply)`.
-6. Rivet forwards the decision to the agent.
-
-Fail-closed semantics: if the PWA is not connected when a permission is requested, the agent blocks until it reconnects. No silent auto-approval on disconnect.
-
-## What crashes look like
-
-**Daemon restart (Rivet restarts, e.g. OS update):**
-- In-flight agent conversations lose their live context window.
-- PWA's IndexedDB retains all historical events.
-- SDK's `resumeSession()` replays the last ~50 events as context into a fresh agent session.
-- Lossy — the agent doesn't remember everything, but it has recent context.
-
-**Client disconnect (phone offline):**
-- Agent keeps running on the host.
-- PWA reconnects with event offset, gets missed events.
-- No state loss.
-
-**Host reboot:**
-- Same as daemon restart but worse — any pending tool operations in flight die.
-- Recovery same as above: replay recent events into a new session.
-
-## Open problems
-
-- **True session resume.** The Claude Agent SDK supports `--resume <session-id>` with full conversation state. Rivet's restoration is replay-based. Gap: can Rivet pass a resume ID through to the underlying agent? Unknown. If not, full-state resume requires bypassing Rivet, which introduces a parallel code path.
-
-- **OAuth TOS clarity.** Anthropic's policy language on OAuth tokens being "Claude Code only" is ambiguous when using Rivet (which actually launches the Claude binary). Using an API key avoids the question; using OAuth is practically safe but legally unclear.
-
-- **Session adoption from `~/.claude/projects/`.** If sessions started via raw `claude` at the desk can be picked up from the phone, that's valuable. Requires reading Claude's on-disk session format (undocumented, fragile).
+- Cloud sandbox providers (E2B, Daytona, Modal). Local-only.
+- Multi-user auth with scoped tokens.
+- IDE integrations (ACP's home turf — wagent is a web/CLI daemon).
+- Multiple agents in one session.
+- MCP server orchestration. Agents pick it up from their own configs.

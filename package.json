@@ -1,27 +1,39 @@
 {
   "name": "wagent",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "version": "0.1.0",
+  "description": "Self-hosted daemon that runs coding agents (Claude, pi) over HTTP+SSE",
   "type": "module",
+  "main": "dist/server.js",
+  "bin": {
+    "wagent": "dist/server.js"
+  },
   "scripts": {
-    "test": "tsx src/test.ts",
-    "serve": "sandbox-agent server --no-token --host 0.0.0.0 --port 2468 --cors-allow-origin http://localhost:5173 --cors-allow-origin http://localhost:3000"
+    "dev": "tsx watch --clear-screen=false src/server.ts",
+    "start": "tsx src/server.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/sdelcore/wagent.git"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "bugs": {
     "url": "https://github.com/sdelcore/wagent/issues"
   },
   "homepage": "https://github.com/sdelcore/wagent#readme",
   "dependencies": {
-    "sandbox-agent": "^0.4.2",
+    "@fastify/cors": "^11.0.1",
+    "better-sqlite3": "^11.10.0",
+    "fastify": "^5.6.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.12.2",
     "tsx": "^4.21.0",
-    "typescript": "^6.0.2"
+    "typescript": "~5.9.2"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }
