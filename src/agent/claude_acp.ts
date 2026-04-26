@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { Writable, Readable } from 'node:stream'
 import * as acp from '@agentclientprotocol/sdk'
 import type {
@@ -253,14 +253,37 @@ function resolveBinary(): string {
   return candidate
 }
 
+// claude-agent-acp's binary resolver prefers the musl native package
+// over the glibc one (linux-${arch}-musl is tried first). On NixOS and
+// other glibc-only distros the musl binary fails to load
+// (`libc.musl-x86_64.so.1` is unavailable), and the user gets a
+// "native binary not found" error even though both packages are on
+// disk. If the user already has a working `claude` on PATH, point at
+// that explicitly via CLAUDE_CODE_EXECUTABLE so the subprocess uses a
+// binary their distro can actually exec.
+function detectClaudeExecutable(): string | undefined {
+  if (process.env.CLAUDE_CODE_EXECUTABLE) return process.env.CLAUDE_CODE_EXECUTABLE
+  if (process.platform !== 'linux') return undefined
+  const which = spawnSync('which', ['claude'], { encoding: 'utf8' })
+  if (which.status === 0) {
+    const path = which.stdout.trim()
+    if (path) return path
+  }
+  return undefined
+}
+
 export const claudeAcpFactory: AgentFactory = {
   async spawn(session: Session, deps: AgentSpawnDeps): Promise<AgentProcess> {
     deps.log.info({ sessionId: session.id, cwd: session.cwd }, 'spawning claude-agent-acp')
 
     const binPath = resolveBinary()
+    const claudeExe = detectClaudeExecutable()
+    if (claudeExe) deps.log.info({ claudeExe }, 'using detected claude binary')
     const child = spawn(process.execPath, [binPath], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: process.env,
+      env: claudeExe
+        ? { ...process.env, CLAUDE_CODE_EXECUTABLE: claudeExe }
+        : process.env,
     })
 
     child.stderr?.on('data', (buf) => {

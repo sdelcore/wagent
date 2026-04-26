@@ -12,7 +12,8 @@
     "start": "tsx src/server.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "smoke": "tsx scripts/smoke.ts"
+    "smoke": "tsx scripts/smoke.ts",
+    "test": "node --import tsx --test scripts/test-api.ts"
   },
   "repository": {
     "type": "git",
