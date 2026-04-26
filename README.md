@@ -100,11 +100,8 @@ arrives with monotonic event indices.
 
 ## Deployment (NixOS)
 
-The flake exposes `nixosModules.default`. The module wires up a systemd
-service, user, and state directory but **does not bundle wagent into
-the Nix store** — better-sqlite3's prebuild-install fights every
-buildNpmPackage / mkDerivation approach (V8 ABI mismatch). You install
-wagent yourself on the host; the module runs it.
+Add the flake input and enable the module — Nix builds wagent for you,
+hosts run no `npm install`.
 
 ```nix
 # In your flake.nix:
@@ -123,33 +120,35 @@ services.wagent = {
 };
 ```
 
-Then on the host (one-time install, repeat on version bumps):
+That's it. `nixos-rebuild switch` builds wagent (Node + better-sqlite3
+compiled from source against the host's exact V8 headers via
+`npm_config_nodedir`), then the systemd service comes up.
 
-```bash
-sudo -u wagent -i
-cd /var/lib/wagent
-mkdir -p install && cd install
-# Option A — install from a `npm pack` tarball you scp'd over:
-npm install /tmp/wagent-0.1.0.tgz
-# Option B — install from a GitHub release:
-npm install https://github.com/sdelcore/wagent/releases/download/v0.1.0/wagent-0.1.0.tgz
-# Option C — point at a checkout:
-ln -s ~/src/wagent /var/lib/wagent/install/node_modules/wagent
-sudo systemctl start wagent
+To run wagent ad-hoc on a NixOS box without enabling the service:
+
 ```
-
-`services.wagent.binary` defaults to
-`/var/lib/wagent/install/node_modules/.bin/wagent`. Override if you
-install elsewhere.
+nix run github:sdelcore/wagent
+```
 
 ## Deployment (non-NixOS)
 
 ```bash
-npm install -g ./wagent-0.1.0.tgz
-# or the GH release tarball URL.
+nix run github:sdelcore/wagent#wagent
 ```
 
-Then write a systemd user unit (or run from your shell):
+If you don't have Nix, install via `npm pack` tarball:
+
+```bash
+# On a build host:
+git clone https://github.com/sdelcore/wagent && cd wagent
+npm ci && npm run build && npm pack
+
+# On the target host:
+mkdir -p ~/.local/share/wagent && cd ~/.local/share/wagent
+npm install /path/to/wagent-0.1.0.tgz
+```
+
+Then write a systemd user unit:
 
 ```ini
 # ~/.config/systemd/user/wagent.service
@@ -158,7 +157,7 @@ Description=wagent
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/env wagent
+ExecStart=%h/.local/share/wagent/node_modules/.bin/wagent
 Restart=on-failure
 Environment=WAGENT_HOST=127.0.0.1
 Environment=WAGENT_PORT=2468

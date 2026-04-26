@@ -11,7 +11,85 @@
       perSystem = flake-utils.lib.eachDefaultSystem (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          packageJson = builtins.fromJSON (builtins.readFile ./package.json);
+
+          # Pre-fetched, content-addressed copy of the npm dep cache.
+          # Hash regenerated via: set to lib.fakeHash, run `nix build`,
+          # copy the actual hash out of the error message.
+          npmDeps = pkgs.fetchNpmDeps {
+            src = ./.;
+            hash = "sha256-2XKGTXlrzby26PSdb+pMKlEYbkquLRLe84K7neVXgWc=";
+          };
+
+          # Source as a Nix derivation — used by the NixOS module so hosts
+          # don't have to clone or download the repo themselves.
+          wagentSource = pkgs.runCommand "wagent-source" {} ''
+            mkdir -p $out
+            cp -r ${./.}/. $out/
+            chmod -R u+w $out
+            # Strip dev-only artifacts that shouldn't reach hosts.
+            rm -rf $out/node_modules $out/dist $out/result $out/.git
+          '';
+
+          wagent = pkgs.stdenv.mkDerivation {
+            pname = packageJson.name;
+            version = packageJson.version;
+            src = ./.;
+
+            nativeBuildInputs = [
+              pkgs.nodejs_22
+              pkgs.makeWrapper
+              pkgs.npmHooks.npmConfigHook
+              # better-sqlite3 ships C++ bindings via node-gyp.
+              pkgs.python3
+              pkgs.pkg-config
+            ];
+
+            inherit npmDeps;
+
+            # Skip postinstall scripts during npm ci so prebuild-install
+            # doesn't fetch a .node that's ABI-incompatible with our
+            # nodejs_22. We rebuild from source explicitly in buildPhase.
+            npmFlags = [ "--ignore-scripts" ];
+
+            buildPhase = ''
+              runHook preBuild
+              # Rebuild native modules from source against nodejs_22's
+              # *exact* V8 headers — node-gyp would otherwise download
+              # the headers from nodejs.org, which can be a different
+              # V8 patch level from what nixpkgs ships, leading to
+              # missing-symbol errors at runtime. `--nodedir` points
+              # node-gyp at our Node's include/ dir.
+              export npm_config_nodedir=${pkgs.nodejs_22}
+              npm rebuild --build-from-source
+              # Now build the TS sources to dist/.
+              npm run build
+              runHook postBuild
+            '';
+
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out/lib/wagent
+              cp -r dist node_modules package.json $out/lib/wagent/
+              mkdir -p $out/bin
+              makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/wagent \
+                --add-flags "$out/lib/wagent/dist/server.js"
+              runHook postInstall
+            '';
+
+            meta = with pkgs.lib; {
+              description = "Daemon that runs coding agents (Claude, pi) over HTTP+SSE";
+              homepage = "https://github.com/sdelcore/wagent";
+              license = licenses.mit;
+              mainProgram = "wagent";
+              platforms = platforms.linux;
+            };
+          };
         in {
+          packages.default = wagent;
+          packages.wagent = wagent;
+          packages.wagent-source = wagentSource;
+
           devShells.default = pkgs.mkShell {
             buildInputs = [ pkgs.nodejs_22 ];
 
@@ -21,48 +99,26 @@
               echo "  Dev:        npm run dev"
               echo "  Typecheck:  npm run typecheck"
               echo "  Smoke:      npm run smoke"
-              echo "  Pack:       npm pack    (produces wagent-X.Y.Z.tgz)"
             '';
           };
         });
 
       # NixOS module — `imports = [ inputs.wagent.nixosModules.default ];`
-      # then `services.wagent.enable = true;`.
-      #
-      # The module deliberately does NOT bundle wagent into the Nix store.
-      # better-sqlite3's prebuild-install + node-gyp dance fights every
-      # buildNpmPackage / mkDerivation approach (V8 ABI mismatch between
-      # the prebuilt .node and any Nix Node we wrap with). Rather than
-      # carry that fight, the module expects you to install wagent into
-      # /var/lib/wagent/install (or anywhere — see `source` option) and
-      # just wires up the systemd service + user + state directory.
-      #
-      # See the README for install options:
-      #   - `npm install` from a `npm pack` tarball
-      #   - `npm install` from a GitHub release tarball URL
-      #   - clone the repo and `npm install`, then point `binary` at it
+      # then `services.wagent.enable = true;`. Hosts don't need to run
+      # `npm install` — Nix builds wagent for them.
       nixosModule = { config, lib, pkgs, ... }:
         let
           cfg = config.services.wagent;
+          wagentPkg = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
         in {
           options.services.wagent = {
             enable = lib.mkEnableOption "wagent — coding-agent HTTP+SSE daemon";
 
-            binary = lib.mkOption {
-              type = lib.types.str;
-              default = "/var/lib/wagent/install/node_modules/.bin/wagent";
-              description = ''
-                Path to the wagent executable. Default location is where
-                `npm install --prefix /var/lib/wagent/install wagent`
-                puts it.
-              '';
-            };
-
-            nodejs = lib.mkOption {
+            package = lib.mkOption {
               type = lib.types.package;
-              default = pkgs.nodejs_22;
-              defaultText = lib.literalExpression "pkgs.nodejs_22";
-              description = "Node.js used to run wagent.";
+              default = wagentPkg;
+              defaultText = lib.literalExpression "wagent.packages.\${system}.default";
+              description = "wagent package to run.";
             };
 
             user = lib.mkOption {
@@ -147,13 +203,6 @@
               after = [ "network-online.target" ];
               wants = [ "network-online.target" ];
 
-              path = [
-                cfg.nodejs
-                # Available for any agent subprocess wagent spawns
-                # (claude-agent-acp, pi --mode rpc) so they don't need
-                # special PATH handling.
-              ];
-
               environment = {
                 WAGENT_HOST = cfg.host;
                 WAGENT_PORT = toString cfg.port;
@@ -163,7 +212,7 @@
 
               serviceConfig = {
                 Type = "simple";
-                ExecStart = "${cfg.nodejs}/bin/node ${cfg.binary}";
+                ExecStart = lib.getExe cfg.package;
                 Restart = "on-failure";
                 RestartSec = 3;
                 User = cfg.user;
@@ -172,10 +221,6 @@
                 StateDirectoryMode = "0750";
                 EnvironmentFile = lib.optional (cfg.environmentFile != null) cfg.environmentFile;
 
-                # Hardening — wagent needs the network and its state
-                # directory. It does spawn subprocesses (the agents), so
-                # we can't lock things down too aggressively without
-                # breaking that.
                 NoNewPrivileges = true;
                 PrivateTmp = true;
                 ProtectSystem = "strict";
