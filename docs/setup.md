@@ -1,71 +1,67 @@
 # Setup
 
+Three install paths, depending on your host:
+
+* **NixOS** — use the flake's NixOS module. See
+  [nixos-setup.md](./nixos-setup.md).
+* **Any system with Nix** — `nix run github:sdelcore/wagent` for a
+  zero-install ad-hoc launch, or build a release tarball from source.
+* **Plain Linux without Nix** — install the published npm tarball
+  and write a systemd user unit yourself.
+
 ## Dev environment (this repo)
 
 ```bash
 cd ~/src/wagent
-direnv allow    # first time only
-# direnv activates the nix flake; node 22 + tooling on PATH
-
+direnv allow            # first time only — activates the nix flake
+                         # (node 22, npm, that's it)
 npm install
-npm test        # runs src/test.ts — smoke test against Claude
+npm run dev             # tsx watch on :2468
+npm test                # full v1 API suite (echo path)
+CLAUDE_E2E=1 npm test   # also exercise the claude-agent-acp adapter
 ```
 
-Requires `ANTHROPIC_API_KEY` in the environment, or a logged-in Claude Code install at `~/.claude/.credentials.json`.
+The smoke test (`npm run smoke`) is a lighter alternative — single
+turn against `echo` by default, configurable via `SMOKE_AGENTS`.
 
-## Host setup (each PC that runs agents)
-
-> **NixOS hosts:** see [nixos-setup.md](./nixos-setup.md) for a drop-in module that handles binary install, systemd service, opnix secret wiring, and Tailscale Serve. The steps below are the generic Linux equivalent.
-
-### 1. Install the daemon
+## Ad-hoc on any Nix host
 
 ```bash
-curl -fsSL https://releases.rivet.dev/sandbox-agent/0.4.x/install.sh | sh
+nix run github:sdelcore/wagent
 ```
 
-Installs `sandbox-agent` to `/usr/local/bin`.
+Listens on `:2468` with default config. Pass env vars before the
+command — e.g. `WAGENT_PORT=12345 nix run github:sdelcore/wagent`.
 
-### 2. Install agents you care about
+## Plain Linux (no Nix)
+
+Get the release tarball from
+<https://github.com/sdelcore/wagent/releases>:
 
 ```bash
-sandbox-agent install-agent claude
-# or: sandbox-agent install-agent --all
+mkdir -p ~/.local/share/wagent && cd ~/.local/share/wagent
+curl -L -o wagent.tgz https://github.com/sdelcore/wagent/releases/latest/download/wagent-0.1.0.tgz
+npm install ./wagent.tgz       # installs the bin into ./node_modules/.bin/wagent
 ```
 
-### 3. Provide credentials
-
-**Option A — API key (simpler, clear TOS):**
-
-```bash
-export ANTHROPIC_API_KEY="sk-ant-api03-..."
-```
-
-Pay per token. No subscription ambiguity.
-
-**Option B — Personal subscription (cheaper for heavy use):**
-
-Log in via the normal `claude` CLI once. sandbox-agent auto-picks up `~/.claude/.credentials.json`.
-
-See [research.md §9.1](../research.md) or Anthropic's TOS for the OAuth vs API-key tradeoff.
-
-### 4. Run as a systemd user service
+Then the systemd user unit:
 
 ```ini
-# ~/.config/systemd/user/sandbox-agent.service
+# ~/.config/systemd/user/wagent.service
 [Unit]
-Description=Sandbox Agent daemon
-After=network.target
+Description=wagent
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-# Use token if you're not fully trusting Tailscale
-ExecStart=/usr/local/bin/sandbox-agent server \
-  --no-token \
-  --host 127.0.0.1 \
-  --port 2468 \
-  --cors-allow-origin https://your-pwa-origin.example
-Environment=ANTHROPIC_API_KEY=sk-ant-api03-...
-Restart=always
-RestartSec=5
+Type=simple
+ExecStart=%h/.local/share/wagent/node_modules/.bin/wagent
+Restart=on-failure
+RestartSec=3
+Environment=WAGENT_HOST=127.0.0.1
+Environment=WAGENT_PORT=2468
+# Bearer token from a managed secret store, e.g.:
+EnvironmentFile=%h/.config/wagent.env
 
 [Install]
 WantedBy=default.target
@@ -73,33 +69,55 @@ WantedBy=default.target
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now sandbox-agent
-systemctl --user status sandbox-agent
+systemctl --user enable --now wagent
+journalctl --user -u wagent -f
 ```
 
-Logs: `journalctl --user -u sandbox-agent -f`.
+## Configuration
 
-### 5. Expose over Tailscale
+| env | default | purpose |
+|---|---|---|
+| `WAGENT_HOST` | `0.0.0.0` | listen host |
+| `WAGENT_PORT` | `2468` | listen port |
+| `WAGENT_DB` | `~/.local/share/wagent/wagent.sqlite` | SQLite path |
+| `WAGENT_TOKEN` | *(unset)* | bearer token; clients send `Authorization: Bearer <token>` |
+| `WAGENT_CORS` | `*` | comma-separated origin allowlist for the v1 API |
+| `LOG_LEVEL` | `info` | Fastify logger level |
+| `CLAUDE_CODE_EXECUTABLE` | *(auto-detected)* | override the `claude` binary used by the claude adapter (set when the bundled native binary doesn't run on your libc, e.g. NixOS picks the musl variant by default) |
+| `ANTHROPIC_API_KEY` | *(unset)* | passed through to claude-agent-acp; the user's subscription OAuth at `~/.claude/` works too |
 
-Tailscale should already be running on the host. Either:
+## Agent installation
 
-- Bind to the Tailscale IP: `--host 100.x.x.x`
-- Or keep binding to `127.0.0.1` and use `tailscale serve` to proxy. Cleaner in ACL terms but one more moving piece.
+* **`echo`** — built-in stub agent, always available. No external deps.
+* **`claude`** — needs the `claude` CLI on the host (subscription
+  OAuth at `~/.claude/` or `ANTHROPIC_API_KEY`). The `claude-agent-acp`
+  npm package ships with wagent and is what wagent talks to.
+* **`pi`** — needs `pi` on PATH (see
+  [pi-mono](https://github.com/badlogic/pi-mono)).
 
-### 6. Verify
+Probe live availability with `curl <host>:2468/v1/agents`. Each row
+has `installed: bool` plus a `reason` if not.
 
-From another device on the tailnet:
+## Verify
+
+From any device that can reach the host:
 
 ```bash
-curl http://<host-tailscale-name>:2468/v1/health
+curl http://<host>:2468/v1/health
+curl http://<host>:2468/v1/meta
+curl http://<host>:2468/v1/agents
 ```
 
-## Client setup (PWA)
+End-to-end:
 
-TBD — droidcode-PWA does not exist yet. The test harness in `src/test.ts` validates the SDK usage patterns that the PWA will mirror.
+```bash
+SID=$(curl -s -X POST http://<host>:2468/v1/sessions \
+  -H 'content-type: application/json' \
+  -d '{"agent":"echo","cwd":"/tmp"}' | jq -r .id)
 
-## Per-project Nix flakes (optional, recommended)
+curl -X POST http://<host>:2468/v1/sessions/$SID/message \
+  -H 'content-type: application/json' \
+  -d '{"content":[{"type":"text","text":"hi"}]}'
 
-For each project you want the agent to work on, drop a `flake.nix` in the project root declaring its toolchain. The agent will pick up the environment via `nix develop` when you spawn a session with that `cwd`.
-
-Not required. Without it, the agent runs in the daemon's environment.
+curl -N http://<host>:2468/v1/sessions/$SID/events/stream
+```

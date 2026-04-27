@@ -3,6 +3,12 @@
 > **Direction reversed 2026-04-25:** wagent is now the daemon, not a
 > Rivet wrapper. The earlier "Rivet unmodified + PWA only" architecture
 > is preserved in commit `828fb6f` for context.
+>
+> **v0.1.0 reflects the contract below**, with two carve-outs flagged
+> inline: the `/mcp/delegate/*` routes and `usage_update` events are
+> design sketches that ship in a later release (see
+> [delegation.md](./delegation.md)). Everything else is live as of
+> tag `v0.1.0`.
 
 ## Shape
 
@@ -21,11 +27,12 @@
 │  Fastify HTTP routes                                        │
 │    GET    /v1/health                                        │
 │    GET    /v1/meta                                          │
+│    GET    /v1/agents                                        │
 │    GET    /v1/sessions[?destroyed=true]                     │
 │    POST   /v1/sessions                                      │
 │    GET    /v1/sessions/:id                                  │
 │    PATCH  /v1/sessions/:id           (alias, model)         │
-│    DELETE /v1/sessions/:id                                  │
+│    DELETE /v1/sessions/:id           (FK-cascades events)   │
 │    GET    /v1/sessions/:id/events    (paged JSON history)   │
 │    GET    /v1/sessions/:id/events/stream  (SSE)             │
 │    POST   /v1/sessions/:id/message                          │
@@ -34,6 +41,10 @@
 │    GET    /v1/projects                                      │
 │    POST   /v1/projects                (upsert)              │
 │    DELETE /v1/projects?directory=...                        │
+│    GET    /v1/fs/entries?path=...                           │
+│    -- planned (delegation, see delegation.md) --            │
+│    POST   /mcp/delegate/:parentSessionId  (loopback only)   │
+│    GET    /mcp/delegate/:parentSessionId  (loopback only)   │
 ├─────────────────────────────────────────────────────────────┤
 │  Subprocess supervisor                                      │
 │    interface AgentProcess                                   │
@@ -78,9 +89,13 @@ data: {"kind":"agent_message_chunk","sessionId":"...","eventIndex":42,
        "createdAt":1776889000000,"payload":{...}}
 ```
 
-`kind` is one of: `agent_message_chunk`, `agent_thought_chunk`,
-`tool_call`, `tool_call_update`, `plan`, `user_message_chunk`,
-`permission_request`, `permission_resolved`, `stop`. Stable v1 contract.
+`kind` (v0.1.0) is one of: `agent_message_chunk`,
+`agent_thought_chunk`, `tool_call`, `tool_call_update`, `plan`,
+`user_message_chunk`, `permission_request`, `permission_resolved`,
+`stop`, `subprocess_died`, `session_destroyed`. Stable v1 contract.
+
+`usage_update` (cumulative token counts) is planned alongside the
+delegation work; not emitted in v0.1.0.
 
 Permission outcomes use ACP wire vocabulary:
 `allow_always` / `allow_once` / `reject`.
@@ -128,6 +143,22 @@ Optional bearer token via `WAGENT_TOKEN`. Loopback solo-dev with no
 token is fine. Any non-loopback exposure (LAN / Tailnet) should set a
 token. Token is checked in a single `onRequest` hook before routes run.
 
+The `/mcp/delegate/*` path is exempt from `WAGENT_TOKEN` and uses its
+own per-spawn token (loopback-only). See `delegation.md` for why.
+
+## Delegation (planned — not in v0.1.0)
+
+The design sketch lives in [delegation.md](./delegation.md). When it
+ships, a wagent session will be able to spawn child sessions through
+a `delegate` tool: the parent agent (any harness that consumes MCP)
+connects to wagent's own MCP HTTP endpoint and calls
+`delegate(harness, prompt, ...)`; wagent creates a child session and
+runs it through the same supervisor + factory machinery as any
+top-level session. Children linked by `parent_session_id`; depth
+capped at 3; destroying a parent cascades. Sync mode blocks until the
+child stops; background mode returns immediately with
+`delegate_status` / `delegate_cancel` for follow-up.
+
 ## Why this is not the Rivet shape
 
 | concern | Rivet | wagent |
@@ -145,5 +176,10 @@ token. Token is checked in a single `onRequest` hook before routes run.
 - Cloud sandbox providers (E2B, Daytona, Modal). Local-only.
 - Multi-user auth with scoped tokens.
 - IDE integrations (ACP's home turf — wagent is a web/CLI daemon).
-- Multiple agents in one session.
-- MCP server orchestration. Agents pick it up from their own configs.
+- Multiple agents in one session. (Cross-session delegation via parent/
+  child links is in scope — see `delegation.md`. One session is still
+  one harness.)
+- General MCP-server orchestration on behalf of harnesses. Agents pick
+  up user-configured MCP servers from their own configs as before.
+  The one exception is wagent's `wagent-delegate` MCP server, which is
+  injected at spawn time so the harness can call `delegate(...)`.
