@@ -1,47 +1,9 @@
 # Codebase orientation
 
-For an AI agent working in this repo. Pairs with `docs/architecture.md`
-(the user-facing version of the same picture).
-
-## What this is
-
-wagent is a single Node + TypeScript daemon (`src/server.ts`) that
-runs coding-agent harnesses on a host and exposes them over HTTP+SSE.
-One process per host, SQLite for state, no IPC, no extra services.
-
-Three harnesses ship: `echo` (built-in stub), `claude`
-(`@anthropic-ai/claude-agent-sdk` — in-process, SDK shells out to
-the `claude` CLI), and `pi` (`@mariozechner/pi-coding-agent` — fully
-in-process).
-
-## Where things live
-
-```
-src/
-  server.ts         Fastify entry — routes, lifecycle, factory wiring
-  config.ts         env parsing
-  types.ts          STABLE v1 wire contract — touch with care
-  db.ts             better-sqlite3 + schema migrations
-  bus.ts            per-session in-memory pubsub
-  agent/
-    process.ts      AgentProcess interface + AgentSpawnDeps + AgentFactory
-    supervisor.ts   owns one AgentProcess per session, lazy spawn, markDead
-    echo.ts         stub agent
-    claude_sdk.ts   Claude SDK adapter + translateClaudeMessage (pure)
-    pi_sdk.ts       pi SDK adapter + translatePiEvent (pure)
-    availability.ts probeClaude / probePi for GET /v1/agents
-    delegate_tokens.ts  per-spawn bearer tokens for the delegate-MCP route
-  events/store.ts   append-only event log with FK cascade on session delete
-  sessions/store.ts session CRUD + delegation cols
-  projects/store.ts project upsert
-  routes/           sessions, events, prompts, projects, agents, fs,
-                    delegate_mcp
-scripts/
-  smoke.ts                  one-turn echo smoke
-  test-api.ts               full v1 API e2e (CLAUDE_E2E=1 also exercises claude)
-  pi-sdk.test.ts            translatePiEvent unit tests
-  claude-sdk.test.ts        translateClaudeMessage unit tests
-```
+For an AI agent working in this repo. Pairs with
+[docs/architecture.md](./docs/architecture.md) (system shape, wire
+contract, lifecycle) — read that first if you don't already have the
+big picture.
 
 ## The interface seam
 
@@ -57,10 +19,15 @@ interface AgentProcess {
 }
 ```
 
-Adapters emit `SessionUpdate` events to `deps.emit`. The supervisor
+Adapters emit `SessionUpdate` events via `deps.emit`. The supervisor
 wires `emit` to SQLite append + bus broadcast — adapters never touch
 either directly. If a harness dies unexpectedly, adapters call
 `deps.markDead(reason)` so the next prompt respawns cleanly.
+
+The three live adapters: `src/agent/echo.ts` (built-in stub),
+`src/agent/claude_sdk.ts` (Claude Agent SDK, in-process; SDK shells
+out to `claude` CLI), `src/agent/pi_sdk.ts` (pi-coding-agent SDK,
+fully in-process).
 
 ## Pure translation helpers
 
@@ -73,28 +40,26 @@ Both SDK adapters split into two pieces:
 - A thin class around the SDK that owns I/O (subscriptions, prompt
   queue, abort) and calls the pure function.
 
-The pure functions are unit-tested with synthetic events
-(`scripts/{pi,claude}-sdk.test.ts`). When fixing event-translation
-bugs, write the test first against the synthetic payload, then fix
-the function — no real harness or API key required.
+When fixing event-translation bugs: write the failing test against a
+synthetic payload in `scripts/{pi,claude}-sdk.test.ts`, then fix the
+function. No real harness or API key required.
 
 ## Wire contract
 
-`src/types.ts` is the v1 wire contract. Clients mirror these types
-directly. Touching `SessionUpdateKind`, `Session` fields, or
-`PermissionOutcome` is a breaking wire change — don't do it without
-explicit instruction.
+`src/types.ts` is the v1 wire contract. Clients mirror it directly.
+Touching `SessionUpdateKind`, `Session` fields, or `PermissionOutcome`
+is a breaking wire change — don't do it without explicit instruction.
 
 `SessionUpdate` is `{ kind, …variant }` — the variant payload is
 intentionally weakly typed (`[key: string]: unknown`) so adapters can
-add fields without churning the type. Document the per-kind shape in
-the relevant adapter's translation function.
+add fields without churning the type. The per-kind shape lives next
+to the translation function in the relevant adapter.
 
 ## Tests
 
 ```bash
 npm run typecheck         # tsc --noEmit
-npm run test:unit         # pi-sdk + claude-sdk pure-function tests
+npm run test:unit         # pure-function tests for both adapters
 npm test                  # unit + full v1 API suite (echo path)
 CLAUDE_E2E=1 npm test     # also drive a real claude session
 npm run smoke             # minimal echo end-to-end against a temp DB
@@ -106,8 +71,7 @@ must be green to merge.
 ## Conventions
 
 - Match the existing style. Two-space indent, single quotes, no
-  semicolons (TypeScript). Prettier is implicit; no formatter config
-  ships with the repo.
+  semicolons.
 - Don't add comments that just describe what the code does. Reserve
   comments for non-obvious *why* — a hidden constraint, a workaround
   for a specific upstream bug, or a subtle invariant.
@@ -116,15 +80,14 @@ must be green to merge.
   it, tear up and replace.
 - Don't introduce new abstractions without two concrete consumers
   already needing them.
-- New deps are a real cost — prefer using stdlib or what's already in
-  the tree. Native modules in particular need a Nix-rebuild (the
-  flake's `npmDeps` hash regenerates from `lib.fakeHash`).
+- New deps are a real cost. Native modules in particular need a Nix
+  rebuild (regenerate the flake's `npmDeps` hash via `lib.fakeHash`,
+  capture the value from the build error).
 
 ## Git workflow
 
 - Never commit on `main`. Branch with a short kebab-case name.
-- One feature per branch; one focused commit per branch (squash on
-  merge). PR body explains the *why*.
+- One feature per branch; squash on merge. PR body explains the *why*.
 - After landing, `git pull origin main` before starting the next
   branch.
 - The flake only sees git-tracked files — `git add` new files before
@@ -132,11 +95,10 @@ must be green to merge.
 
 ## NixOS quirks
 
-The Claude SDK shells out to a `claude` binary. The bundled native
-module prefers the musl variant on Linux; on NixOS that misses
-glibc. `availability.probeClaude` and `claude_sdk.ts` both honor
-`CLAUDE_CODE_EXECUTABLE` (auto-detected via `which claude` if unset)
-to redirect to a working binary.
+Claude Code's bundled launcher prefers the musl native binary, which
+fails on glibc-only distros. `availability.probeClaude` and
+`claude_sdk.ts` both honor `CLAUDE_CODE_EXECUTABLE` (auto-detected
+via `which claude` if unset) to redirect to a working binary.
 
 `better-sqlite3` is rebuilt from source against `nodejs_22`'s exact
 V8 headers in the flake (`npm rebuild --build-from-source` with
