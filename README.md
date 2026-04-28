@@ -27,6 +27,29 @@ A small Node + TypeScript service that:
   [docs/delegation.md](./docs/delegation.md).
 - Ships as a single Node entry point, packaged via Nix.
 
+## Why
+
+Hands-off, mobile-first access to coding agents running on my own
+PCs. Concretely: start a new session on my desktop from my phone,
+see sessions across multiple machines from one client, have the
+agent keep working when I put my phone down for 20 minutes, let it
+touch the host directly when needed, and not be locked into one
+harness.
+
+What didn't fit:
+
+| Tool | Why it doesn't fit |
+|---|---|
+| **Anthropic Claude Code Remote Control** | Can't start sessions remotely (requires `claude` already running). One session per machine. Claude only. Closed protocol. |
+| **Rivet `sandbox-agent`** (vanilla) | Assumes you deploy it inside a cloud sandbox (E2B, Daytona, etc.). Sessions don't persist across daemon restarts. No multi-host aggregation. |
+| **Tailscale + SSH + tmux** | Works, but the UX on a phone while holding a baby is miserable. |
+| **Happy Coder, ccpocket, etc.** | Claude-only, wrap the `claude` CLI, single-session, no multi-host. |
+
+Stance: personal use only, lean on existing infrastructure (Rivet's
+schema where it fits, Nix, Tailscale, vendor SDKs), one genuinely
+novel piece — the daemon + persistence model for personal PCs.
+Everything else is integration.
+
 ## Quick start
 
 ```bash
@@ -52,8 +75,6 @@ user unit) see **[docs/setup.md](./docs/setup.md)**.
 
 ## Docs
 
-- [why.md](./docs/why.md) — what this solves and why existing tools
-  don't.
 - [architecture.md](./docs/architecture.md) — current shape, wire
   contract, session lifecycle.
 - [setup.md](./docs/setup.md) — install + run on any host.
