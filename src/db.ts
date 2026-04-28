@@ -20,8 +20,13 @@ CREATE TABLE IF NOT EXISTS sessions (
   model TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  destroyed_at INTEGER
+  destroyed_at INTEGER,
+  parent_session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+  parent_tool_call_id TEXT,
+  delegation_depth INTEGER NOT NULL DEFAULT 0,
+  delegation_mode TEXT
 );
+CREATE INDEX IF NOT EXISTS sessions_by_parent ON sessions (parent_session_id);
 
 CREATE TABLE IF NOT EXISTS events (
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -53,6 +58,23 @@ export function openDatabase(path: string): DbHandle {
   if (!v) {
     raw.prepare('INSERT INTO schema_version (version) VALUES (?)').run(1)
   }
+  // Idempotent column additions for databases created before delegation
+  // landed. SQLite has no "ADD COLUMN IF NOT EXISTS" so we swallow the
+  // duplicate-column error.
+  for (const stmt of [
+    `ALTER TABLE sessions ADD COLUMN parent_session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE`,
+    `ALTER TABLE sessions ADD COLUMN parent_tool_call_id TEXT`,
+    `ALTER TABLE sessions ADD COLUMN delegation_depth INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE sessions ADD COLUMN delegation_mode TEXT`,
+  ]) {
+    try {
+      raw.exec(stmt)
+    } catch (err) {
+      const msg = (err as Error).message
+      if (!/duplicate column name/i.test(msg)) throw err
+    }
+  }
+  raw.exec(`CREATE INDEX IF NOT EXISTS sessions_by_parent ON sessions (parent_session_id)`)
   return {
     raw,
     close: () => raw.close(),

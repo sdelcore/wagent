@@ -2,6 +2,43 @@
 
 Log of key decisions, most recent first. Each entry: what was decided, what alternative was rejected, and the reason.
 
+## 2026-04-26 — Cross-harness delegation as a wagent primitive
+
+**Decision:** Add a single `delegate(harness, prompt, ...)` MCP tool
+that lets a parent agent spawn a child wagent session of any installed
+harness, supervised by wagent. Sessions gain `parent_session_id`,
+`parent_tool_call_id`, `delegation_depth` (capped at 3), and
+`delegation_mode` ('sync' | 'background'). Wagent injects a single
+`wagent-delegate` HTTP MCP server into each spawned harness;
+loopback-only, per-spawn bearer token, bypasses `WAGENT_TOKEN`. See
+[delegation.md](./delegation.md).
+
+**Rejected:**
+- Stdio MCP subprocess per harness (more moving parts, env-var token
+  leakage to harness env).
+- Pure pass-through to Claude SDK's native `agents:` (intra-harness
+  only — can't have a Claude parent dispatch to a pi child).
+- Composio-style fleet of parallel worktrees (different problem;
+  doesn't fit the "one user, one phone" UX).
+
+**Reason:** Multi-harness was always the architectural promise of the
+plugin abstraction (`AgentFactory`). Without delegation, that
+abstraction is unexercised — each session is a silo. The HTTP MCP
+endpoint is in-process, ~300 lines of new code, reuses existing
+supervisor/event/permission flows, and validates the cross-harness
+contract before a second harness driver lands.
+
+**Implication / supersedes:**
+- 2026-04-16 "Not automatic multi-agent orchestration. One session =
+  one agent" — still holds for *automatic* (wagent doesn't decide).
+  Reversed for *agent-initiated* delegation: one session is still
+  one harness, but sessions can now be linked parent → child, and
+  parallel children (background mode) are first-class.
+- The architecture.md "MCP server orchestration. Agents pick it up
+  from their own configs." — narrowed: user-configured MCP still
+  comes from the agent's own config, but wagent injects exactly one
+  server (`wagent-delegate`) into every spawned harness.
+
 ## 2026-04-25 — Reverse 2026-04-16: build wagent as our own daemon, drop Rivet
 
 **Decision:** Build wagent as a Node + TypeScript daemon (Fastify, better-sqlite3, child-process supervision) that exposes coding agents over HTTP+SSE. Spawn `claude-agent-acp` (Claude) and `pi --mode rpc` (pi) as long-lived per-session subprocesses. Stable v1 wire contract, bearer-token auth, single-binary-feel deployment.
@@ -77,4 +114,4 @@ Recording these so scope creep has something to push against:
 - **Not hosted.** No wagent-cloud.
 - **Not a harness framework.** We drive existing harnesses (Claude, OpenCode, Codex). We don't build another one.
 - **Not a web UI replacement for Claude Code.** The PWA is a remote control, not a full IDE.
-- **Not automatic multi-agent orchestration.** One session = one agent. Parallel agents are the user's problem.
+- **Not automatic multi-agent orchestration.** One session = one harness. Wagent doesn't decide when to spawn sub-agents — agents do, via the `delegate` tool. (Updated 2026-04-26: the original "parallel agents are the user's problem" no longer holds; cross-harness delegation is now a first-class primitive. See [delegation.md](./delegation.md).)

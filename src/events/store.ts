@@ -1,5 +1,10 @@
 import type { DbHandle } from '../db.js'
-import type { EventEnvelope, SessionUpdate, SessionUpdateKind } from '../types.js'
+import type {
+  EventEnvelope,
+  SessionUpdate,
+  SessionUpdateKind,
+  UsageSnapshot,
+} from '../types.js'
 
 interface EventRow {
   session_id: string
@@ -51,6 +56,23 @@ export class EventStore {
       }
     })
     return tx(sessionId, update)
+  }
+
+  // Latest cumulative usage snapshot for one session, or null if the
+  // session has never emitted a usage_update event. Adapters that don't
+  // report usage (pi, echo) leave this null — callers should treat that
+  // as "unknown," not "zero."
+  latestUsage(sessionId: string): UsageSnapshot | null {
+    const row = this.db.raw
+      .prepare(
+        `SELECT payload_json FROM events
+         WHERE session_id = ? AND kind = 'usage_update'
+         ORDER BY event_index DESC LIMIT 1`,
+      )
+      .get(sessionId) as { payload_json: string } | undefined
+    if (!row) return null
+    const payload = JSON.parse(row.payload_json) as { usage?: UsageSnapshot }
+    return payload.usage ?? null
   }
 
   list(

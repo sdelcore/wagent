@@ -9,6 +9,7 @@ import { EventStore } from './events/store.js'
 import { ProjectStore } from './projects/store.js'
 import { SessionBus } from './bus.js'
 import { AgentSupervisor } from './agent/supervisor.js'
+import { DelegateTokenStore } from './agent/delegate_tokens.js'
 import { echoFactory } from './agent/echo.js'
 import { claudeAcpFactory } from './agent/claude_acp.js'
 import { piRpcFactory } from './agent/pi_rpc.js'
@@ -18,6 +19,7 @@ import { registerPromptRoutes } from './routes/prompts.js'
 import { registerProjectRoutes } from './routes/projects.js'
 import { registerAgentRoutes } from './routes/agents.js'
 import { registerFsRoutes } from './routes/fs.js'
+import { registerDelegateMcpRoutes } from './routes/delegate_mcp.js'
 import { probeAll } from './agent/availability.js'
 
 const PKG_PATH = fileURLToPath(new URL('../package.json', import.meta.url))
@@ -40,6 +42,10 @@ async function main() {
   if (config.token) {
     app.addHook('onRequest', async (req, reply) => {
       if (req.method === 'OPTIONS') return
+      // Delegate MCP has its own auth (per-spawn token, loopback-only).
+      // Don't gate it behind WAGENT_TOKEN — the harness child process
+      // has no business knowing that token.
+      if (req.url.startsWith('/mcp/delegate/')) return
       const header = req.headers.authorization ?? ''
       const match = /^Bearer\s+(.+)$/i.exec(header)
       if (!match || match[1] !== config.token) {
@@ -70,6 +76,12 @@ async function main() {
   const eventStore = new EventStore(db)
   const projectStore = new ProjectStore(db)
   const bus = new SessionBus()
+  const delegateTokens = new DelegateTokenStore()
+
+  // Loopback URL the daemon advertises to harness children for the
+  // delegate-MCP endpoint. Always 127.0.0.1 — the public bind host
+  // (0.0.0.0 by default) is irrelevant for in-host MCP traffic.
+  const delegateBaseUrl = `http://127.0.0.1:${config.port}`
 
   const supervisor = new AgentSupervisor({
     sessionStore,
@@ -81,6 +93,8 @@ async function main() {
       claude: claudeAcpFactory,
       pi: piRpcFactory,
     },
+    delegateTokens,
+    delegateBaseUrl,
   })
 
   registerSessionRoutes(app, { sessionStore, eventStore, bus, supervisor })
@@ -89,6 +103,13 @@ async function main() {
   registerProjectRoutes(app, { projectStore })
   registerAgentRoutes(app)
   registerFsRoutes(app)
+  registerDelegateMcpRoutes(app, {
+    sessionStore,
+    eventStore,
+    bus,
+    supervisor,
+    delegateTokens,
+  })
 
   const shutdown = async () => {
     try {
