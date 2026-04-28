@@ -46,16 +46,16 @@
 │    POST   /mcp/delegate/:parentSessionId  (loopback only)   │
 │    GET    /mcp/delegate/:parentSessionId  (loopback only)   │
 ├─────────────────────────────────────────────────────────────┤
-│  Subprocess supervisor                                      │
+│  Agent supervisor                                           │
 │    interface AgentProcess                                   │
 │      prompt / cancel / events / respondPermission / close   │
 │    impls:                                                   │
 │      ClaudeAcp — spawns claude-agent-acp, ACP JSON-RPC      │
-│      PiRpc     — spawns `pi --mode rpc`, native JSON-RPC    │
+│      PiSdk    — in-process via pi-coding-agent SDK          │
 ├─────────────────────────────────────────────────────────────┤
 │  Event normalizer                                           │
 │    Each adapter emits one internal SessionUpdate shape.     │
-│    ACP envelopes do not leak past this layer.               │
+│    Vendor envelopes do not leak past this layer.            │
 ├─────────────────────────────────────────────────────────────┤
 │  Persistence (better-sqlite3)                               │
 │    sessions, events (append-only), projects.                │
@@ -68,8 +68,9 @@
 
        on the same host:
        ┌────────────────────────┐    ┌────────────────────────┐
-       │ claude-agent-acp child │    │ pi --mode rpc child    │
-       │ (per session)          │    │ (per session)          │
+       │ claude-agent-acp child │    │ pi AgentSession        │
+       │ (per session)          │    │ (in-process, per       │
+       │                        │    │  session)              │
        └────────────────────────┘    └────────────────────────┘
 ```
 
@@ -100,11 +101,13 @@ delegation work; not emitted in v0.1.0.
 Permission outcomes use ACP wire vocabulary:
 `allow_always` / `allow_once` / `reject`.
 
-Internal (wagent ↔ subprocess):
+Internal (wagent ↔ harness):
 
-- `claude-agent-acp` — JSON-RPC over stdio per the ACP spec.
-- `pi --mode rpc` — pi's own newline-JSON commands (`prompt`, `steer`,
-  `abort`, `set_model`, `get_state`, …).
+- `claude-agent-acp` — JSON-RPC over stdio per the ACP spec
+  (out-of-process; the translator binary in turn spawns `claude`).
+- `pi-coding-agent` SDK — in-process `createAgentSession()`; events
+  arrive via `session.subscribe(...)` and prompts through
+  `session.prompt(...)`.
 
 Normalizer fan-in means routes only see our `SessionUpdate` shape.
 

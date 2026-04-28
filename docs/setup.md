@@ -92,8 +92,13 @@ journalctl --user -u wagent -f
 * **`claude`** — needs the `claude` CLI on the host (subscription
   OAuth at `~/.claude/` or `ANTHROPIC_API_KEY`). The `claude-agent-acp`
   npm package ships with wagent and is what wagent talks to.
-* **`pi`** — needs `pi` on PATH (see
-  [pi-mono](https://github.com/badlogic/pi-mono)).
+* **`pi`** — runs in-process via the
+  [`@mariozechner/pi-coding-agent`](https://github.com/badlogic/pi-mono)
+  SDK, which ships with wagent. No `pi` binary on PATH required. Auth
+  for the underlying model provider (Anthropic / OpenAI / etc.) reads
+  from the same `~/.pi/agent/auth.json` that the `pi` CLI writes
+  (configure once with `pi` if you want OAuth) or from environment
+  variables.
 
 Probe live availability with `curl <host>:2468/v1/agents`. Each row
 has `installed: bool` plus a `reason` if not.

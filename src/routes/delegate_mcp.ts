@@ -239,7 +239,7 @@ const TOOL_DEFS = [
           type: 'string',
           enum: VALID_AGENTS,
           description:
-            'Which agent harness to spawn the child as. "claude" = Claude Code via ACP, "pi" = pi --mode rpc, "echo" = stub for testing.',
+            'Which agent harness to spawn the child as. "claude" = Claude Code via ACP, "pi" = pi-coding-agent SDK (in-process), "echo" = stub for testing.',
         },
         prompt: {
           type: 'string',
