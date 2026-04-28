@@ -1,50 +1,107 @@
 # Setup
 
-Three install paths, depending on your host:
+Three install paths.
 
-* **NixOS** — use the flake's NixOS module. See
-  [nixos-setup.md](./nixos-setup.md).
-* **Any system with Nix** — `nix run github:sdelcore/wagent` for a
-  zero-install ad-hoc launch, or build a release tarball from source.
-* **Plain Linux without Nix** — install the published npm tarball
-  and write a systemd user unit yourself.
+## NixOS (recommended)
 
-## Dev environment (this repo)
+The flake exports a NixOS module. Hosts don't run `npm install` —
+Nix builds wagent (with `better-sqlite3` compiled from source
+against `nodejs_22`'s V8 headers) before the systemd unit comes up.
 
-```bash
-cd ~/src/wagent
-direnv allow            # first time only — activates the nix flake
-                         # (node 22, npm, that's it)
-npm install
-npm run dev             # tsx watch on :2468
-npm test                # full v1 API suite (echo path)
-CLAUDE_E2E=1 npm test   # also exercise the Claude Agent SDK adapter
+```nix
+# flake.nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    wagent.url  = "github:sdelcore/wagent";
+  };
+  outputs = { self, nixpkgs, wagent, ... }: {
+    nixosConfigurations.nightman = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [ wagent.nixosModules.default ./hosts/nightman.nix ];
+    };
+  };
+}
 ```
 
-The smoke test (`npm run smoke`) is a lighter alternative — single
-turn against `echo` by default, configurable via `SMOKE_AGENTS`.
+```nix
+# hosts/nightman.nix
+{
+  services.wagent = {
+    enable = true;
+    host = "0.0.0.0";              # or "127.0.0.1" for loopback only
+    port = 2468;
+    cors = "https://droidcode.example.ts.net";
+    openFirewall = true;
+    environmentFile = "/run/agenix/wagent.env";  # WAGENT_TOKEN, ANTHROPIC_API_KEY
+    extraEnvironment.LOG_LEVEL = "debug";
+  };
+}
+```
 
-## Ad-hoc on any Nix host
+`nixos-rebuild switch`, then `journalctl -u wagent -f`.
+
+The DB lives at `/var/lib/wagent/wagent.sqlite`. The unit hardens via
+`NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`,
+`ProtectHome=read-only`, and `ReadWritePaths=[ "/var/lib/wagent" ]`.
+
+### Module options
+
+| option | type | default | purpose |
+|---|---|---|---|
+| `enable` | bool | `false` | turn the service on |
+| `package` | package | flake default | override the wagent build |
+| `user` | str | `"wagent"` | service user (auto-created if default) |
+| `host` | str | `"127.0.0.1"` | listen address |
+| `port` | port | `2468` | HTTP port |
+| `cors` | str | `"*"` | comma-separated origin allowlist |
+| `environmentFile` | path \| null | `null` | KEY=value secrets file sourced by systemd |
+| `extraEnvironment` | attrs of str | `{}` | extra env vars |
+| `openFirewall` | bool | `false` | open the port in `networking.firewall` |
+
+### Tailscale Serve (optional, for HTTPS over tailnet)
+
+```nix
+services.wagent.host = "127.0.0.1";
+services.wagent.openFirewall = false;
+services.tailscale.enable = true;
+
+systemd.services.wagent-tailscale-serve = {
+  after = [ "tailscaled.service" "wagent.service" ];
+  wants = [ "tailscaled.service" "wagent.service" ];
+  wantedBy = [ "multi-user.target" ];
+  serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+  script = ''
+    ${pkgs.tailscale}/bin/tailscale serve --bg --https=443 \
+      http://127.0.0.1:2468
+  '';
+};
+```
+
+Reachable at `https://<hostname>.<tailnet>.ts.net/` with a Tailscale
+cert.
+
+## Any system with Nix
 
 ```bash
 nix run github:sdelcore/wagent
 ```
 
-Listens on `:2468` with default config. Pass env vars before the
-command — e.g. `WAGENT_PORT=12345 nix run github:sdelcore/wagent`.
+Same binary, no service. Pass env vars before the command:
+`WAGENT_PORT=12345 nix run github:sdelcore/wagent`.
 
 ## Plain Linux (no Nix)
 
-Get the release tarball from
-<https://github.com/sdelcore/wagent/releases>:
+Get the release tarball from the
+[releases page](https://github.com/sdelcore/wagent/releases):
 
 ```bash
 mkdir -p ~/.local/share/wagent && cd ~/.local/share/wagent
 curl -L -o wagent.tgz https://github.com/sdelcore/wagent/releases/latest/download/wagent-0.1.0.tgz
-npm install ./wagent.tgz       # installs the bin into ./node_modules/.bin/wagent
+npm install ./wagent.tgz
 ```
 
-Then the systemd user unit:
+Systemd user unit:
 
 ```ini
 # ~/.config/systemd/user/wagent.service
@@ -60,7 +117,6 @@ Restart=on-failure
 RestartSec=3
 Environment=WAGENT_HOST=127.0.0.1
 Environment=WAGENT_PORT=2468
-# Bearer token from a managed secret store, e.g.:
 EnvironmentFile=%h/.config/wagent.env
 
 [Install]
@@ -73,6 +129,20 @@ systemctl --user enable --now wagent
 journalctl --user -u wagent -f
 ```
 
+## Dev environment (this repo)
+
+```bash
+cd ~/src/wagent
+direnv allow            # first time only — activates the nix flake
+npm install
+npm run dev             # tsx watch on :2468
+npm run typecheck
+npm run test:unit       # pure-function unit tests
+npm test                # full v1 API suite (echo path)
+CLAUDE_E2E=1 npm test   # also exercise the Claude Agent SDK
+npm run smoke           # one-turn echo run
+```
+
 ## Configuration
 
 | env | default | purpose |
@@ -81,34 +151,27 @@ journalctl --user -u wagent -f
 | `WAGENT_PORT` | `2468` | listen port |
 | `WAGENT_DB` | `~/.local/share/wagent/wagent.sqlite` | SQLite path |
 | `WAGENT_TOKEN` | *(unset)* | bearer token; clients send `Authorization: Bearer <token>` |
-| `WAGENT_CORS` | `*` | comma-separated origin allowlist for the v1 API |
+| `WAGENT_CORS` | `*` | comma-separated origin allowlist |
 | `LOG_LEVEL` | `info` | Fastify logger level |
-| `CLAUDE_CODE_EXECUTABLE` | *(auto-detected)* | override the `claude` binary used by the claude adapter (set when the bundled native binary doesn't run on your libc, e.g. NixOS picks the musl variant by default) |
-| `ANTHROPIC_API_KEY` | *(unset)* | passed through to the Claude Agent SDK; the user's subscription OAuth at `~/.claude/` works too |
+| `CLAUDE_CODE_EXECUTABLE` | *(auto-detected via `which claude`)* | path to the `claude` binary the SDK shells out to. Set when the bundled binary doesn't run on your libc (e.g. NixOS picks the musl variant by default). |
+| `ANTHROPIC_API_KEY` | *(unset)* | passed through to the Claude Agent SDK; subscription OAuth at `~/.claude/` works too. |
 
 ## Agent installation
 
-* **`echo`** — built-in stub agent, always available. No external deps.
+* **`echo`** — built-in stub, always available.
 * **`claude`** — needs the `claude` CLI on the host (subscription
-  OAuth at `~/.claude/` or `ANTHROPIC_API_KEY`). Wagent embeds the
-  [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk),
-  which shells out to that binary. On NixOS, set
-  `CLAUDE_CODE_EXECUTABLE` (auto-detected via `which claude` when
-  unset) so the SDK uses a glibc binary.
-* **`pi`** — runs in-process via the
+  OAuth at `~/.claude/` or `ANTHROPIC_API_KEY`). The Claude Agent SDK
+  ships with wagent and shells out to that binary.
+* **`pi`** — runs in-process via the bundled
   [`@mariozechner/pi-coding-agent`](https://github.com/badlogic/pi-mono)
-  SDK, which ships with wagent. No `pi` binary on PATH required. Auth
-  for the underlying model provider (Anthropic / OpenAI / etc.) reads
-  from the same `~/.pi/agent/auth.json` that the `pi` CLI writes
-  (configure once with `pi` if you want OAuth) or from environment
-  variables.
+  SDK. No `pi` binary on PATH required. Auth reads from the same
+  `~/.pi/agent/auth.json` the `pi` CLI writes (configure once with
+  `pi`) or from environment variables.
 
-Probe live availability with `curl <host>:2468/v1/agents`. Each row
-has `installed: bool` plus a `reason` if not.
+`curl <host>:2468/v1/agents` returns live availability with
+`installed: bool` and a `reason` if not.
 
 ## Verify
-
-From any device that can reach the host:
 
 ```bash
 curl http://<host>:2468/v1/health

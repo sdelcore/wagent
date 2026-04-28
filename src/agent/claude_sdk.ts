@@ -190,10 +190,10 @@ interface PendingPermission {
   resolve(r: PermissionResult): void
 }
 
-// claude-agent-acp's binary resolver prefers the musl native package
-// over the glibc one (linux-${arch}-musl is tried first). The Claude
-// Agent SDK shells out to the same `claude` binary, so the same NixOS
-// workaround applies — point the SDK at a working glibc binary.
+// Claude Code's bundled launcher prefers the musl native package over
+// the glibc one (linux-${arch}-musl is tried first), which fails on
+// NixOS and other glibc-only distros. If the host has a working
+// `claude` on PATH, point the SDK at it via pathToClaudeCodeExecutable.
 function detectClaudeExecutable(): string | undefined {
   if (process.env.CLAUDE_CODE_EXECUTABLE) return process.env.CLAUDE_CODE_EXECUTABLE
   if (process.platform !== 'linux') return undefined
