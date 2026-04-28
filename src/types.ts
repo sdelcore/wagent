@@ -43,8 +43,8 @@ export type SessionUpdateKind =
   | 'usage_update'
 
 // Token usage snapshot. Adapters emit this in a `usage_update` event
-// when the underlying harness reports it (claude-agent-acp does;
-// pi/echo currently don't). All counts are cumulative for the session.
+// when the underlying harness reports it. All counts are cumulative
+// for the session.
 export interface UsageSnapshot {
   inputTokens: number
   outputTokens: number

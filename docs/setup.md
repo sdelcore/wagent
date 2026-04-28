@@ -18,7 +18,7 @@ direnv allow            # first time only — activates the nix flake
 npm install
 npm run dev             # tsx watch on :2468
 npm test                # full v1 API suite (echo path)
-CLAUDE_E2E=1 npm test   # also exercise the claude-agent-acp adapter
+CLAUDE_E2E=1 npm test   # also exercise the Claude Agent SDK adapter
 ```
 
 The smoke test (`npm run smoke`) is a lighter alternative — single
@@ -84,14 +84,17 @@ journalctl --user -u wagent -f
 | `WAGENT_CORS` | `*` | comma-separated origin allowlist for the v1 API |
 | `LOG_LEVEL` | `info` | Fastify logger level |
 | `CLAUDE_CODE_EXECUTABLE` | *(auto-detected)* | override the `claude` binary used by the claude adapter (set when the bundled native binary doesn't run on your libc, e.g. NixOS picks the musl variant by default) |
-| `ANTHROPIC_API_KEY` | *(unset)* | passed through to claude-agent-acp; the user's subscription OAuth at `~/.claude/` works too |
+| `ANTHROPIC_API_KEY` | *(unset)* | passed through to the Claude Agent SDK; the user's subscription OAuth at `~/.claude/` works too |
 
 ## Agent installation
 
 * **`echo`** — built-in stub agent, always available. No external deps.
 * **`claude`** — needs the `claude` CLI on the host (subscription
-  OAuth at `~/.claude/` or `ANTHROPIC_API_KEY`). The `claude-agent-acp`
-  npm package ships with wagent and is what wagent talks to.
+  OAuth at `~/.claude/` or `ANTHROPIC_API_KEY`). Wagent embeds the
+  [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk),
+  which shells out to that binary. On NixOS, set
+  `CLAUDE_CODE_EXECUTABLE` (auto-detected via `which claude` when
+  unset) so the SDK uses a glibc binary.
 * **`pi`** — runs in-process via the
   [`@mariozechner/pi-coding-agent`](https://github.com/badlogic/pi-mono)
   SDK, which ships with wagent. No `pi` binary on PATH required. Auth

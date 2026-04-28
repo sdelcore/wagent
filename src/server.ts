@@ -11,7 +11,7 @@ import { SessionBus } from './bus.js'
 import { AgentSupervisor } from './agent/supervisor.js'
 import { DelegateTokenStore } from './agent/delegate_tokens.js'
 import { echoFactory } from './agent/echo.js'
-import { claudeAcpFactory } from './agent/claude_acp.js'
+import { claudeSdkFactory } from './agent/claude_sdk.js'
 import { piSdkFactory } from './agent/pi_sdk.js'
 import { registerSessionRoutes } from './routes/sessions.js'
 import { registerEventRoutes } from './routes/events.js'
@@ -90,7 +90,7 @@ async function main() {
     log: app.log,
     factories: {
       echo: echoFactory,
-      claude: claudeAcpFactory,
+      claude: claudeSdkFactory,
       pi: piSdkFactory,
     },
     delegateTokens,
