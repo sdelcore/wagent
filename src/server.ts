@@ -12,7 +12,7 @@ import { AgentSupervisor } from './agent/supervisor.js'
 import { DelegateTokenStore } from './agent/delegate_tokens.js'
 import { echoFactory } from './agent/echo.js'
 import { claudeAcpFactory } from './agent/claude_acp.js'
-import { piRpcFactory } from './agent/pi_rpc.js'
+import { piSdkFactory } from './agent/pi_sdk.js'
 import { registerSessionRoutes } from './routes/sessions.js'
 import { registerEventRoutes } from './routes/events.js'
 import { registerPromptRoutes } from './routes/prompts.js'
@@ -91,7 +91,7 @@ async function main() {
     factories: {
       echo: echoFactory,
       claude: claudeAcpFactory,
-      pi: piRpcFactory,
+      pi: piSdkFactory,
     },
     delegateTokens,
     delegateBaseUrl,

@@ -13,7 +13,8 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "smoke": "tsx scripts/smoke.ts",
-    "test": "node --import tsx --test scripts/test-api.ts"
+    "test": "node --import tsx --test scripts/pi-sdk.test.ts scripts/test-api.ts",
+    "test:unit": "node --import tsx --test scripts/pi-sdk.test.ts"
   },
   "repository": {
     "type": "git",
@@ -28,6 +29,7 @@
     "@agentclientprotocol/claude-agent-acp": "^0.31.0",
     "@agentclientprotocol/sdk": "^0.20.0",
     "@fastify/cors": "^11.0.1",
+    "@mariozechner/pi-coding-agent": "^0.70.5",
     "better-sqlite3": "^12.9.0",
     "fastify": "^5.6.1"
   },

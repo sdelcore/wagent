@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import type { AgentKind } from '../types.js'
@@ -77,62 +76,33 @@ async function probeClaude(): Promise<AgentAvailability> {
 }
 
 async function probePi(): Promise<AgentAvailability> {
-  // Pi is expected to be on PATH. Run `pi --version` with a short
-  // timeout; non-zero exit or ENOENT means missing.
-  return new Promise<AgentAvailability>((resolve) => {
-    let resolved = false
-    const child = spawn('pi', ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] })
-    const timer = setTimeout(() => {
-      if (!resolved) {
-        resolved = true
-        try {
-          child.kill('SIGKILL')
-        } catch {}
-        resolve({
-          id: 'pi',
-          installed: false,
-          reason: 'probe_failed',
-          notes: 'pi --version timed out (>2s)',
-        })
-      }
-    }, 2_000)
-
-    let out = ''
-    child.stdout?.on('data', (b) => {
-      out += b.toString('utf8')
-    })
-
-    child.on('error', (err) => {
-      if (resolved) return
-      resolved = true
-      clearTimeout(timer)
-      const code = (err as NodeJS.ErrnoException).code
-      resolve({
-        id: 'pi',
-        installed: false,
-        reason: code === 'ENOENT' ? 'binary_missing' : 'probe_failed',
-        notes: `pi --version error: ${err.message}`,
-      })
-    })
-
-    child.on('exit', (code) => {
-      if (resolved) return
-      resolved = true
-      clearTimeout(timer)
-      if (code !== 0) {
-        resolve({
-          id: 'pi',
-          installed: false,
-          reason: 'probe_failed',
-          notes: `pi --version exit code ${code}`,
-        })
-        return
-      }
-      resolve({
-        id: 'pi',
-        installed: true,
-        version: out.trim().split('\n')[0],
-      })
-    })
-  })
+  // Pi runs in-process via the @mariozechner/pi-coding-agent SDK.
+  // Presence of the bundled package under our node_modules is enough
+  // to confirm pi is usable. Auth is per-model and not probed here —
+  // createAgentSession surfaces auth errors at session creation time.
+  const pkgPath = fileURLToPath(
+    new URL('../../node_modules/@mariozechner/pi-coding-agent/package.json', import.meta.url),
+  )
+  if (!existsSync(pkgPath)) {
+    return {
+      id: 'pi',
+      installed: false,
+      reason: 'package_missing',
+      notes: '@mariozechner/pi-coding-agent not in node_modules',
+    }
+  }
+  let version: string | undefined
+  try {
+    const { readFileSync } = await import('node:fs')
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: string }
+    version = pkg.version
+  } catch {
+    // best-effort
+  }
+  return {
+    id: 'pi',
+    installed: true,
+    version,
+    notes: 'in-process via @mariozechner/pi-coding-agent SDK',
+  }
 }

@@ -9,9 +9,11 @@ Not a product. Not multi-tenant. One user, many devices.
 
 A small Node + TypeScript service that:
 
-- Spawns and supervises coding-agent subprocesses on the host
-  (Claude via [`@agentclientprotocol/claude-agent-acp`](https://www.npmjs.com/package/@agentclientprotocol/claude-agent-acp),
-  pi via [`pi --mode rpc`](https://github.com/badlogic/pi-mono)).
+- Drives coding-agent harnesses on the host
+  (Claude via [`@agentclientprotocol/claude-agent-acp`](https://www.npmjs.com/package/@agentclientprotocol/claude-agent-acp)
+  as a child subprocess; pi in-process via the
+  [`@mariozechner/pi-coding-agent`](https://www.npmjs.com/package/@mariozechner/pi-coding-agent)
+  SDK).
 - Speaks JSON over HTTP for control + Server-Sent Events for streaming.
 - Persists sessions and event history in SQLite so reconnecting clients
   don't lose state.
@@ -41,8 +43,8 @@ the workarounds. See [docs/decisions.md](./docs/decisions.md).
 
 **v0.1 — feature-complete for solo use.** Sessions, events with SSE,
 prompts, cancel, permissions, projects, cross-harness delegation.
-Adapters for `echo` (stub), `claude-agent-acp`, and `pi --mode rpc`.
-Smoke test runs end-to-end.
+Adapters for `echo` (stub), `claude-agent-acp`, and the in-process pi
+SDK. Smoke test runs end-to-end.
 
 | | |
 |---|---|
@@ -53,6 +55,7 @@ Smoke test runs end-to-end.
 | pi --mode rpc adapter | `74fbd24` |
 | Projects CRUD | `987a24d` |
 | Delegation (`delegate` MCP tool) | unreleased |
+| pi SDK adapter (in-process, replaces RPC) | unreleased |
 
 Of droidcode's 20 documented Rivet workarounds, **17 are eliminated by
 wagent's design**, 3 are n/a (client-side concerns or features wagent

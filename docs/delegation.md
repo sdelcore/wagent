@@ -66,7 +66,7 @@ Implementation:
     headers:[{name:'authorization',value:'Bearer <token>'}]}] })`.
     claude-agent-acp forwards `type:'http'` MCP servers through to
     Claude SDK unchanged (verified at acp-agent.js:1206).
-  - `pi_rpc.ts` — **deferred**. Pi has no native MCP support
+  - `pi_sdk.ts` — **deferred**. Pi has no native MCP support
     ([pi README](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/README.md):
     "No MCP. Build CLI tools with READMEs"). Pi-as-parent would need
     either a pi extension that bridges MCP, or a `wagent-delegate`
