@@ -231,13 +231,18 @@ test('POST /v1/sessions rejects unknown agent → 400 invalid_agent', async () =
   assert.equal(body.error.code, 'invalid_agent')
 })
 
-test('POST /v1/sessions rejects uninstalled agent → 409 agent_not_available', async () => {
-  // pi isn't on PATH on this host; the precheck should refuse upfront.
+test('POST /v1/sessions accepts an installed agent (pi via SDK)', async () => {
+  // pi now ships as an npm dep, so the precheck should accept it. Auth
+  // for the underlying model is per-session and surfaced by the SDK at
+  // first prompt — not gated here.
   const res = await api('POST', '/v1/sessions', { agent: 'pi', cwd: '/tmp' })
-  // Either 409 (precheck saw pi missing) or 201 (pi happens to be installed
-  // wherever the suite is running). Tolerate both so this isn't a flaky test
-  // depending on the host.
+  // Tolerate 409 too in case some future setup makes pi conditionally
+  // unavailable (e.g. install profile that omits the package).
   assert.ok([201, 409].includes(res.status))
+  if (res.status === 201) {
+    const body = (await res.json()) as { id: string }
+    await api('DELETE', `/v1/sessions/${body.id}`)
+  }
 })
 
 test('sessions: create / list / get / patch / delete', async () => {

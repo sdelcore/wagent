@@ -2,6 +2,45 @@
 
 Log of key decisions, most recent first. Each entry: what was decided, what alternative was rejected, and the reason.
 
+## 2026-04-28 — Drop `pi --mode rpc` subprocess, drive pi in-process via its SDK
+
+**Decision:** Replace the `pi --mode rpc` child-process adapter with
+an in-process driver built on `@mariozechner/pi-coding-agent`'s
+`createAgentSession()` API. Pi is now a library dependency, not a
+PATH binary. Adapter file renamed `src/agent/pi_rpc.ts` →
+`src/agent/pi_sdk.ts`. Wire contract is unchanged.
+
+**Rejected:**
+- Keep the RPC subprocess and add a thin wrapper. Doesn't earn its
+  keep — the JSONL framing, hand-rolled LF-only line splitter
+  (because `readline` mishandles U+2028 inside JSON), request/response
+  demuxer, and exit handler all exist solely to traverse a process
+  boundary that has no security or isolation value here.
+- Wait for an ACP adapter on the pi side. ACP would re-add the
+  process hop without addressing the actual problem; pi's maintainer
+  isn't planning ACP support.
+
+**Reason:** ~150 lines of subprocess plumbing collapse to ~50 lines
+of `session.subscribe(...)` event translation. The SDK exposes a
+typed event union (`AgentEvent`) that maps 1:1 onto wagent's
+`SessionUpdate` types we already emit, so the migration was a literal
+event-name rename. Permission flow is unchanged (pi's coding agent
+still runs without permission gating). Auth flow is unchanged
+(SDK reads the same `~/.pi/agent/auth.json` the `pi` CLI writes).
+
+**Implication:**
+- Hosts no longer need `pi` installed; the SDK ships with wagent.
+- `availability.probePi` now checks for the npm package under
+  `node_modules/`, mirroring how `probeClaude` does it for
+  `@agentclientprotocol/claude-agent-acp`.
+- `subprocess_died` is no longer emitted for pi (no subprocess to
+  die). Prompt errors flow through `stop` with `reason: 'error'`.
+  Wire-stable: the event kind still exists for the claude adapter.
+- The same pattern applies to claude. A follow-up PR will replace
+  the `claude-agent-acp` translator with `@anthropic-ai/claude-agent-sdk`,
+  collapsing the 2-process chain (translator → claude binary) to 1
+  (claude binary, managed by SDK).
+
 ## 2026-04-26 — Cross-harness delegation as a wagent primitive
 
 **Decision:** Add a single `delegate(harness, prompt, ...)` MCP tool
