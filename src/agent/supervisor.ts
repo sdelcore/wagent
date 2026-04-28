@@ -4,6 +4,7 @@ import type { EventStore } from '../events/store.js'
 import type { SessionStore } from '../sessions/store.js'
 import type { SessionBus } from '../bus.js'
 import type { AgentKind } from '../types.js'
+import type { DelegateTokenStore } from './delegate_tokens.js'
 
 export interface SupervisorDeps {
   sessionStore: SessionStore
@@ -11,6 +12,10 @@ export interface SupervisorDeps {
   bus: SessionBus
   log: FastifyBaseLogger
   factories: Partial<Record<AgentKind, AgentFactory>>
+  delegateTokens: DelegateTokenStore
+  // Loopback URL the daemon is reachable at (e.g. http://127.0.0.1:2468).
+  // Used to build the delegate-MCP endpoint URL for harness MCP configs.
+  delegateBaseUrl: string
 }
 
 // Owns the live AgentProcess for each session. Callers ask for a process
@@ -38,9 +43,18 @@ export class AgentSupervisor {
     const factory = this.deps.factories[session.agent]
     if (!factory) throw new Error(`no factory registered for agent ${session.agent}`)
 
+    // Mint a delegate token for this session so it can spawn children
+    // through the delegate-MCP endpoint. Token is revoked on closeOne.
+    const token = this.deps.delegateTokens.mint(session.id, session.delegationDepth)
+    const delegate = {
+      url: `${this.deps.delegateBaseUrl}/mcp/delegate/${session.id}`,
+      token,
+    }
+
     const promise = (async () => {
       const proc = await factory.spawn(session, {
         log: this.deps.log.child({ sessionId, agent: session.agent }),
+        delegate,
         emit: (update) => {
           // Persist first so SSE replay can find it, then publish live.
           const event = this.deps.eventStore.append(sessionId, update)
@@ -51,6 +65,7 @@ export class AgentSupervisor {
           // next prompt respawns; emit an event so clients render a
           // "agent crashed, send a prompt to restart" affordance.
           this.processes.delete(sessionId)
+          this.deps.delegateTokens.revoke(sessionId)
           const event = this.deps.eventStore.append(sessionId, {
             kind: 'subprocess_died',
             reason,
@@ -77,6 +92,7 @@ export class AgentSupervisor {
 
   async closeOne(sessionId: string): Promise<void> {
     const proc = this.processes.get(sessionId)
+    this.deps.delegateTokens.revoke(sessionId)
     if (!proc) return
     this.processes.delete(sessionId)
     try {

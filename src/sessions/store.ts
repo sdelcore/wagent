@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { DbHandle } from '../db.js'
-import type { AgentKind, Session } from '../types.js'
+import type { AgentKind, DelegationMode, Session } from '../types.js'
 
 interface SessionRow {
   id: string
@@ -11,6 +11,10 @@ interface SessionRow {
   created_at: number
   updated_at: number
   destroyed_at: number | null
+  parent_session_id: string | null
+  parent_tool_call_id: string | null
+  delegation_depth: number
+  delegation_mode: string | null
 }
 
 function rowToSession(row: SessionRow): Session {
@@ -23,6 +27,10 @@ function rowToSession(row: SessionRow): Session {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     destroyedAt: row.destroyed_at,
+    parentSessionId: row.parent_session_id,
+    parentToolCallId: row.parent_tool_call_id,
+    delegationDepth: row.delegation_depth,
+    delegationMode: row.delegation_mode as DelegationMode | null,
   }
 }
 
@@ -31,6 +39,10 @@ export interface CreateSessionInput {
   cwd: string
   alias?: string | null
   model?: string | null
+  parentSessionId?: string | null
+  parentToolCallId?: string | null
+  delegationDepth?: number
+  delegationMode?: DelegationMode | null
 }
 
 export class SessionStore {
@@ -41,10 +53,24 @@ export class SessionStore {
     const now = Date.now()
     this.db.raw
       .prepare(
-        `INSERT INTO sessions (id, agent, cwd, alias, model, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO sessions (
+           id, agent, cwd, alias, model, created_at, updated_at,
+           parent_session_id, parent_tool_call_id, delegation_depth, delegation_mode
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, input.agent, input.cwd, input.alias ?? null, input.model ?? null, now, now)
+      .run(
+        id,
+        input.agent,
+        input.cwd,
+        input.alias ?? null,
+        input.model ?? null,
+        now,
+        now,
+        input.parentSessionId ?? null,
+        input.parentToolCallId ?? null,
+        input.delegationDepth ?? 0,
+        input.delegationMode ?? null,
+      )
     return {
       id,
       agent: input.agent,
@@ -54,6 +80,10 @@ export class SessionStore {
       createdAt: now,
       updatedAt: now,
       destroyedAt: null,
+      parentSessionId: input.parentSessionId ?? null,
+      parentToolCallId: input.parentToolCallId ?? null,
+      delegationDepth: input.delegationDepth ?? 0,
+      delegationMode: input.delegationMode ?? null,
     }
   }
 
@@ -64,15 +94,38 @@ export class SessionStore {
     return row ? rowToSession(row) : null
   }
 
-  list(opts: { includeDestroyed?: boolean } = {}): Session[] {
-    const rows = (
-      opts.includeDestroyed
-        ? this.db.raw.prepare('SELECT * FROM sessions ORDER BY created_at DESC').all()
-        : this.db.raw
-            .prepare('SELECT * FROM sessions WHERE destroyed_at IS NULL ORDER BY created_at DESC')
-            .all()
-    ) as SessionRow[]
+  list(opts: { includeDestroyed?: boolean; parentSessionId?: string } = {}): Session[] {
+    const where: string[] = []
+    const args: unknown[] = []
+    if (!opts.includeDestroyed) where.push('destroyed_at IS NULL')
+    if (opts.parentSessionId !== undefined) {
+      where.push('parent_session_id = ?')
+      args.push(opts.parentSessionId)
+    }
+    const sql = `SELECT * FROM sessions${where.length ? ' WHERE ' + where.join(' AND ') : ''} ORDER BY created_at DESC`
+    const rows = this.db.raw.prepare(sql).all(...args) as SessionRow[]
     return rows.map(rowToSession)
+  }
+
+  // Walk the parent->child tree breadth-first. Returns descendants only
+  // (not the root). Order: parents before children, useful for top-down
+  // operations; reverse for bottom-up (e.g. close subprocesses before
+  // their parent).
+  listDescendants(rootId: string): Session[] {
+    const out: Session[] = []
+    const queue = [rootId]
+    const stmt = this.db.raw.prepare(
+      'SELECT * FROM sessions WHERE parent_session_id = ? ORDER BY created_at ASC',
+    )
+    while (queue.length > 0) {
+      const id = queue.shift()!
+      const children = stmt.all(id) as SessionRow[]
+      for (const row of children) {
+        out.push(rowToSession(row))
+        queue.push(row.id)
+      }
+    }
+    return out
   }
 
   update(id: string, patch: { alias?: string | null; model?: string | null }): Session | null {
@@ -94,7 +147,7 @@ export class SessionStore {
     return this.get(id)
   }
 
-  // Hard delete — FK on events cascades.
+  // Hard delete — FK on events cascades, FK on parent_session_id cascades to children.
   delete(id: string): boolean {
     const result = this.db.raw.prepare('DELETE FROM sessions WHERE id = ?').run(id)
     return result.changes > 0

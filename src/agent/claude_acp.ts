@@ -219,6 +219,30 @@ function translateUpdate(update: acp.SessionNotification['update']): SessionUpda
       }
     case 'plan':
       return { kind: 'plan', entries: update.entries }
+    case 'usage_update': {
+      const u = (update as { usage?: unknown }).usage as
+        | {
+            inputTokens?: number
+            outputTokens?: number
+            cachedReadTokens?: number | null
+            cachedWriteTokens?: number | null
+            thoughtTokens?: number | null
+            totalTokens?: number
+          }
+        | undefined
+      if (!u) return null
+      return {
+        kind: 'usage_update',
+        usage: {
+          inputTokens: u.inputTokens ?? 0,
+          outputTokens: u.outputTokens ?? 0,
+          ...(u.cachedReadTokens != null ? { cachedReadTokens: u.cachedReadTokens } : {}),
+          ...(u.cachedWriteTokens != null ? { cachedWriteTokens: u.cachedWriteTokens } : {}),
+          ...(u.thoughtTokens != null ? { thoughtTokens: u.thoughtTokens } : {}),
+          ...(u.totalTokens != null ? { totalTokens: u.totalTokens } : {}),
+        },
+      }
+    }
     default:
       return null
   }
@@ -309,9 +333,23 @@ export const claudeAcpFactory: AgentFactory = {
       clientCapabilities: {},
     })
 
+    // Inject wagent's delegate-MCP server so the agent can call
+    // `delegate(...)` to spawn child sessions. claude-agent-acp
+    // forwards type:'http' MCP servers through to Claude SDK
+    // (acp-agent.js:1206). Skip if depth cap reached — no point
+    // exposing the tool when delegate would always reject.
+    const mcpServers: acp.McpServer[] = []
+    if (deps.delegate && session.delegationDepth < 3) {
+      mcpServers.push({
+        type: 'http',
+        name: 'wagent-delegate',
+        url: deps.delegate.url,
+        headers: [{ name: 'authorization', value: `Bearer ${deps.delegate.token}` }],
+      })
+    }
     const newResp = await conn.newSession({
       cwd: session.cwd,
-      mcpServers: [],
+      mcpServers,
     })
 
     agent = new ClaudeAcpAgent(child, conn, newResp.sessionId, session.id, deps)

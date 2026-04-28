@@ -2,6 +2,10 @@
 
 export type AgentKind = 'claude' | 'pi' | 'echo'
 
+export type DelegationMode = 'sync' | 'background'
+
+export const MAX_DELEGATION_DEPTH = 3
+
 export interface Session {
   id: string
   agent: AgentKind
@@ -11,6 +15,10 @@ export interface Session {
   createdAt: number
   updatedAt: number
   destroyedAt: number | null
+  parentSessionId: string | null
+  parentToolCallId: string | null
+  delegationDepth: number
+  delegationMode: DelegationMode | null
 }
 
 export interface ContentBlock {
@@ -32,6 +40,19 @@ export type SessionUpdateKind =
   | 'stop'
   | 'subprocess_died'
   | 'session_destroyed'
+  | 'usage_update'
+
+// Token usage snapshot. Adapters emit this in a `usage_update` event
+// when the underlying harness reports it (claude-agent-acp does;
+// pi/echo currently don't). All counts are cumulative for the session.
+export interface UsageSnapshot {
+  inputTokens: number
+  outputTokens: number
+  cachedReadTokens?: number
+  cachedWriteTokens?: number
+  thoughtTokens?: number
+  totalTokens?: number
+}
 
 export interface SessionUpdate {
   kind: SessionUpdateKind

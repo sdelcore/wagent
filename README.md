@@ -16,6 +16,10 @@ A small Node + TypeScript service that:
 - Persists sessions and event history in SQLite so reconnecting clients
   don't lose state.
 - Handles permissions, cancellation, and per-session model switching.
+- Lets a parent agent dispatch focused subtasks to a child session of
+  any installed harness (`delegate` tool over loopback MCP). Sync or
+  background, depth-capped, cascade-destroyed. See
+  [docs/delegation.md](./docs/delegation.md).
 - Ships as a single Node entry point, packaged via Nix.
 
 Replaces [Rivet `sandbox-agent`](https://github.com/rivet-dev/sandbox-agent)
@@ -36,8 +40,9 @@ the workarounds. See [docs/decisions.md](./docs/decisions.md).
 ## Status
 
 **v0.1 — feature-complete for solo use.** Sessions, events with SSE,
-prompts, cancel, permissions, projects. Adapters for `echo` (stub),
-`claude-agent-acp`, and `pi --mode rpc`. Smoke test runs end-to-end.
+prompts, cancel, permissions, projects, cross-harness delegation.
+Adapters for `echo` (stub), `claude-agent-acp`, and `pi --mode rpc`.
+Smoke test runs end-to-end.
 
 | | |
 |---|---|
@@ -47,6 +52,7 @@ prompts, cancel, permissions, projects. Adapters for `echo` (stub),
 | claude-agent-acp adapter | `a6d8ca0` |
 | pi --mode rpc adapter | `74fbd24` |
 | Projects CRUD | `987a24d` |
+| Delegation (`delegate` MCP tool) | unreleased |
 
 Of droidcode's 20 documented Rivet workarounds, **17 are eliminated by
 wagent's design**, 3 are n/a (client-side concerns or features wagent
@@ -188,10 +194,18 @@ src/
   server.ts        Fastify entry, routes, lifecycle
   config.ts        env parsing
   db.ts            better-sqlite3 + schema
-  (agent/, http/, etc. — land in upcoming commits)
+  bus.ts           per-session in-memory pubsub
+  types.ts         wire types (stable v1)
+  agent/           AgentProcess interface, factories, supervisor, delegate tokens
+  events/          event store
+  projects/        project store
+  routes/          HTTP routes (sessions, events, prompts, projects,
+                   agents, fs, delegate_mcp)
+  sessions/        session store
 docs/
-  why.md, setup.md, nixos-setup.md, architecture.md, decisions.md
-flake.nix          Nix dev shell — node 22, packages sandbox-agent (transition only)
+  why.md, setup.md, nixos-setup.md, architecture.md, decisions.md,
+  delegation.md, droidcode-migration.md, limitations-tracker.md
+flake.nix          Nix dev shell — node 22
 ```
 
 ## License

@@ -41,6 +41,14 @@ export interface AgentSpawnDeps {
     error(obj: object, msg?: string): void
     debug(obj: object, msg?: string): void
   }
+  // Wagent-side delegation MCP endpoint config. Adapters that support
+  // MCP server injection (claude_acp, eventually pi_rpc) include this
+  // server in the harness's MCP list so the running agent can call
+  // `delegate(...)`. Adapters that don't support MCP just ignore it.
+  delegate?: {
+    url: string    // e.g. http://127.0.0.1:2468/mcp/delegate/<sessionId>
+    token: string  // bearer token, scoped to this parent session
+  }
 }
 
 export interface AgentFactory {
