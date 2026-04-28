@@ -61,11 +61,10 @@ Implementation:
   the global `WAGENT_TOKEN` gate** for this path. Loopback-only
   (reject non-127.x source IPs).
 - Each factory injects an HTTP-MCP server config:
-  - `claude_acp.ts` — `newSession({ mcpServers: [{type:'http',
-    name:'wagent-delegate', url:'http://127.0.0.1:<port>/mcp/delegate/<id>',
-    headers:[{name:'authorization',value:'Bearer <token>'}]}] })`.
-    claude-agent-acp forwards `type:'http'` MCP servers through to
-    Claude SDK unchanged (verified at acp-agent.js:1206).
+  - `claude_sdk.ts` — passes `mcpServers: { 'wagent-delegate': {
+    type: 'http', url, headers: { authorization: 'Bearer <token>' } } }`
+    directly to `query({ options })`. The Claude Agent SDK forwards
+    HTTP MCP server configs to the underlying claude binary unchanged.
   - `pi_sdk.ts` — **deferred**. Pi has no native MCP support
     ([pi README](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/README.md):
     "No MCP. Build CLI tools with READMEs"). Pi-as-parent would need
@@ -159,7 +158,7 @@ Phase 2 adds:
 
 - Migration: three new columns on `sessions`.
 - `src/agent/delegate_mcp.ts` — stdio MCP binary.
-- Wire injection into `claude_acp.ts` (`mcpServers` arg).
+- Wire injection into `claude_sdk.ts` (`mcpServers` arg in query options).
 - Routes: `POST /v1/sessions` accepts parent fields; `GET /v1/sessions`
   filters by `parentSessionId`.
 - Depth cap, scope subset enforcement.

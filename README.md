@@ -9,11 +9,11 @@ Not a product. Not multi-tenant. One user, many devices.
 
 A small Node + TypeScript service that:
 
-- Drives coding-agent harnesses on the host
-  (Claude via [`@agentclientprotocol/claude-agent-acp`](https://www.npmjs.com/package/@agentclientprotocol/claude-agent-acp)
-  as a child subprocess; pi in-process via the
-  [`@mariozechner/pi-coding-agent`](https://www.npmjs.com/package/@mariozechner/pi-coding-agent)
-  SDK).
+- Drives coding-agent harnesses on the host, in-process via vendor SDKs
+  (Claude via [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk),
+  pi via [`@mariozechner/pi-coding-agent`](https://www.npmjs.com/package/@mariozechner/pi-coding-agent)).
+  The Claude SDK still shells out to the `claude` CLI binary, but
+  manages it for us — wagent itself spawns no agent subprocesses.
 - Speaks JSON over HTTP for control + Server-Sent Events for streaming.
 - Persists sessions and event history in SQLite so reconnecting clients
   don't lose state.
@@ -43,8 +43,8 @@ the workarounds. See [docs/decisions.md](./docs/decisions.md).
 
 **v0.1 — feature-complete for solo use.** Sessions, events with SSE,
 prompts, cancel, permissions, projects, cross-harness delegation.
-Adapters for `echo` (stub), `claude-agent-acp`, and the in-process pi
-SDK. Smoke test runs end-to-end.
+Adapters for `echo` (stub), the Claude Agent SDK, and the pi SDK
+(both in-process). Smoke test runs end-to-end.
 
 | | |
 |---|---|
@@ -56,6 +56,7 @@ SDK. Smoke test runs end-to-end.
 | Projects CRUD | `987a24d` |
 | Delegation (`delegate` MCP tool) | unreleased |
 | pi SDK adapter (in-process, replaces RPC) | unreleased |
+| Claude SDK adapter (replaces ACP translator) | unreleased |
 
 Of droidcode's 20 documented Rivet workarounds, **17 are eliminated by
 wagent's design**, 3 are n/a (client-side concerns or features wagent
@@ -98,7 +99,7 @@ curl -X POST http://localhost:2468/v1/sessions/$SID/abort
 
 ```bash
 npm run smoke                      # echo only — no external deps required
-SMOKE_AGENTS=echo,claude npm run smoke   # also exercise claude-agent-acp
+SMOKE_AGENTS=echo,claude npm run smoke   # also exercise the Claude SDK adapter
                                           # (needs ANTHROPIC_API_KEY or `claude /login`)
 SMOKE_AGENTS=echo,pi npm run smoke        # also exercise pi (needs `pi` on PATH)
 ```

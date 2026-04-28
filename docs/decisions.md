@@ -2,6 +2,57 @@
 
 Log of key decisions, most recent first. Each entry: what was decided, what alternative was rejected, and the reason.
 
+## 2026-04-28 — Drop ACP, drive Claude in-process via the Claude Agent SDK
+
+**Decision:** Replace the `claude-agent-acp` translator subprocess
+with the official `@anthropic-ai/claude-agent-sdk`, called in-process
+via `query({ prompt, options })`. Adapter file renamed
+`src/agent/claude_acp.ts` → `src/agent/claude_sdk.ts`. ACP package
+deps (`@agentclientprotocol/sdk`, `@agentclientprotocol/claude-agent-acp`)
+removed. Wire contract is unchanged.
+
+**Rejected:**
+- Keep ACP as a portable wire. We already deferred multi-agent
+  support beyond Claude + pi (2026-04-25), so the portability
+  premium ACP charges (an extra subprocess, an extra protocol layer,
+  permission option-id table juggling) wasn't earning its keep.
+- V2 SDK (`unstable_v2_createSession`). Multi-turn state is cleaner
+  than the streaming-input pattern, but the API is marked `@alpha`
+  and subject to change. Revisit when stable.
+
+**Reason:** Concrete reductions in wagent's surface area:
+- 1 subprocess instead of 2 (ACP translator → claude CLI). The
+  Claude SDK still shells out to the `claude` binary, but the SDK
+  manages it for us.
+- ACP option-id mapping (`allow_once` / `allow_always` / `reject_*` →
+  per-server option strings) collapses to a `canUseTool` callback
+  that returns `{behavior: 'allow' | 'deny'}` directly.
+- `unstable_setSessionModel` reflection gone; `model` is a typed
+  option in the SDK (with the caveat that V1 streaming-input mode
+  doesn't hot-swap mid-conversation — model changes apply on
+  next session spawn, same as before).
+- MCP injection becomes a typed config object (`mcpServers: {
+  'wagent-delegate': { type: 'http', url, headers } }`) instead of
+  ACP's `newSession({ mcpServers: [...] })` array.
+
+**Implication:**
+- `availability.probeClaude` now probes the `claude` binary on PATH
+  (the SDK still depends on it). NixOS musl workaround moves from
+  the spawn-args (`CLAUDE_CODE_EXECUTABLE` env var) to the SDK's
+  typed `pathToClaudeCodeExecutable` option, with the same env-var
+  fallback.
+- Multi-turn state persists across `prompt()` calls via a
+  streaming-input `AsyncIterable<SDKUserMessage>` pushed into
+  `query()` once per session — the underlying `claude` process stays
+  alive between turns, matching the previous ACP-era behavior.
+- Permission outcomes `allow_once` and `allow_always` both map to
+  `{behavior: 'allow'}` for now. The SDK's `updatedPermissions`
+  affordance for "allow always" persistence is not wired through —
+  v0.1 doesn't persist permission rules across sessions.
+- `subprocess_died` events are still emitted for claude when the
+  pump throws. The wire kind is unchanged; the underlying signal
+  is now "SDK iterator threw" rather than "ACP child exited".
+
 ## 2026-04-28 — Drop `pi --mode rpc` subprocess, drive pi in-process via its SDK
 
 **Decision:** Replace the `pi --mode rpc` child-process adapter with

@@ -18,7 +18,7 @@
           # copy the actual hash out of the error message.
           npmDeps = pkgs.fetchNpmDeps {
             src = ./.;
-            hash = "sha256-dB9O19xmcctgLYAmR4JYeGPst/D3eDLkVqvd3LYgxXk=";
+            hash = "sha256-GAiQzBXG4v79bNsQtYYUkP7Elo+Qq2Xmx99RDg03hy4=";
           };
 
           # Source as a Nix derivation — used by the NixOS module so hosts
