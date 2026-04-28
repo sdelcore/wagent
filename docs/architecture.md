@@ -68,9 +68,9 @@
 
        on the same host:
        ┌────────────────────────┐    ┌────────────────────────┐
-       │ claude-agent-acp child │    │ pi AgentSession        │
-       │ (per session)          │    │ (in-process, per       │
-       │                        │    │  session)              │
+       │ `claude` CLI child     │    │ pi AgentSession        │
+       │ (managed by SDK,       │    │ (in-process, per       │
+       │  per session)          │    │  session)              │
        └────────────────────────┘    └────────────────────────┘
 ```
 
@@ -103,8 +103,12 @@ Permission outcomes use ACP wire vocabulary:
 
 Internal (wagent ↔ harness):
 
-- `claude-agent-acp` — JSON-RPC over stdio per the ACP spec
-  (out-of-process; the translator binary in turn spawns `claude`).
+- `claude-agent-sdk` — in-process `query({ prompt, options })`. The
+  SDK consumes our streaming-input prompt iterator, manages the
+  `claude` CLI child process, and emits typed `SDKMessage` events.
+  Permissions flow through the SDK's `canUseTool` callback. MCP
+  servers are passed in the `mcpServers` option (used for the
+  delegation endpoint).
 - `pi-coding-agent` SDK — in-process `createAgentSession()`; events
   arrive via `session.subscribe(...)` and prompts through
   `session.prompt(...)`.

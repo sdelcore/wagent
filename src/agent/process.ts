@@ -42,7 +42,7 @@ export interface AgentSpawnDeps {
     debug(obj: object, msg?: string): void
   }
   // Wagent-side delegation MCP endpoint config. Adapters that support
-  // MCP server injection (claude_acp; pi_sdk would need a bridge —
+  // MCP server injection (claude_sdk; pi_sdk would need a bridge —
   // pi has no native MCP) include this server in the harness's MCP
   // list so the running agent can call `delegate(...)`. Adapters that
   // don't support MCP just ignore it.

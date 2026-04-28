@@ -7,7 +7,7 @@
 //
 // Run:
 //   npm test                                # echo only
-//   CLAUDE_E2E=1 npm test                   # also exercise claude-agent-acp
+//   CLAUDE_E2E=1 npm test                   # also exercise the Claude Agent SDK
 //   RUN_ALL=1 npm test                      # claude + future agents
 //
 // Exits non-zero on any failure.
