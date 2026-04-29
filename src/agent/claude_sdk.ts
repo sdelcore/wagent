@@ -254,6 +254,25 @@ class ClaudeSdkAgent implements AgentProcess {
       }
     }
 
+    // Build the MCP server map. Caller-supplied servers from
+    // session.options.mcpServers merge alongside the per-spawn
+    // `wagent-delegate` HTTP server (if delegation is wired up). The
+    // route layer rejects caller use of the reserved key, so a clobber
+    // here would be a programmer error.
+    const mcpServers: NonNullable<Options['mcpServers']> = {}
+    if (sessionOpts?.mcpServers) {
+      for (const [name, spec] of Object.entries(sessionOpts.mcpServers)) {
+        mcpServers[name] = spec
+      }
+    }
+    if (this.deps.delegate) {
+      mcpServers['wagent-delegate'] = {
+        type: 'http',
+        url: this.deps.delegate.url,
+        headers: { authorization: `Bearer ${this.deps.delegate.token}` },
+      }
+    }
+
     const opts: Options = {
       cwd: this.session.cwd,
       abortController: this.abort,
@@ -264,17 +283,7 @@ class ClaudeSdkAgent implements AgentProcess {
       ...(sessionOpts?.allowedTools !== undefined
         ? { allowedTools: sessionOpts.allowedTools }
         : {}),
-      ...(this.deps.delegate
-        ? {
-            mcpServers: {
-              'wagent-delegate': {
-                type: 'http',
-                url: this.deps.delegate.url,
-                headers: { authorization: `Bearer ${this.deps.delegate.token}` },
-              },
-            },
-          }
-        : {}),
+      ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
       ...(detectClaudeExecutable()
         ? { pathToClaudeCodeExecutable: detectClaudeExecutable()! }
         : {}),
