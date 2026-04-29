@@ -92,6 +92,12 @@ interface Session {
     systemPrompt?: string
     appendSystemPrompt?: string
     allowedTools?: string[]
+    mcpServers?: Record<
+      string,
+      | { type?: 'stdio'; command: string; args?: string[]; env?: Record<string, string> }
+      | { type: 'http'; url: string; headers?: Record<string, string> }
+      | { type: 'sse'; url: string; headers?: Record<string, string> }
+    >
   } | null
 }
 
@@ -300,6 +306,124 @@ test('POST /v1/sessions rejects non-string-array allowedTools → 400 invalid_op
     agent: 'echo',
     cwd: '/tmp',
     options: { allowedTools: ['ok', 7] },
+  })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'invalid_options')
+})
+
+test('POST /v1/sessions persists options.mcpServers (stdio + http + sse)', async () => {
+  const created = await json<Session>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: {
+      mcpServers: {
+        recall: { type: 'stdio', command: 'recall-mcp', args: ['--vault', '/tmp/v'] },
+        gateway: { type: 'http', url: 'https://example/mcp', headers: { 'x-k': 'v' } },
+        live: { type: 'sse', url: 'https://example/mcp/sse' },
+      },
+    },
+  })
+  assert.deepEqual(created.options, {
+    mcpServers: {
+      recall: { type: 'stdio', command: 'recall-mcp', args: ['--vault', '/tmp/v'] },
+      gateway: { type: 'http', url: 'https://example/mcp', headers: { 'x-k': 'v' } },
+      live: { type: 'sse', url: 'https://example/mcp/sse' },
+    },
+  })
+  const got = await json<Session>('GET', `/v1/sessions/${created.id}`)
+  assert.deepEqual(got.options, created.options)
+  await api('DELETE', `/v1/sessions/${created.id}`)
+})
+
+test('POST /v1/sessions defaults mcpServers entry type to stdio', async () => {
+  const created = await json<Session>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: {
+      mcpServers: { recall: { command: 'recall-mcp' } },
+    },
+  })
+  assert.deepEqual(created.options, {
+    mcpServers: { recall: { type: 'stdio', command: 'recall-mcp' } },
+  })
+  await api('DELETE', `/v1/sessions/${created.id}`)
+})
+
+test('POST /v1/sessions empty mcpServers → options is null', async () => {
+  // Empty mcpServers collapses the same way an empty options object
+  // does — wagent never persists "no preferences" as an empty blob.
+  const created = await json<Session>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: { mcpServers: {} },
+  })
+  assert.equal(created.options, null)
+  await api('DELETE', `/v1/sessions/${created.id}`)
+})
+
+test('POST /v1/sessions rejects non-object mcpServers → 400 invalid_options', async () => {
+  const res = await api('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: { mcpServers: ['bad'] },
+  })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'invalid_options')
+})
+
+test('POST /v1/sessions rejects unknown mcpServers transport type → 400 invalid_options', async () => {
+  const res = await api('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: { mcpServers: { x: { type: 'wat', command: 'foo' } } },
+  })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'invalid_options')
+})
+
+test('POST /v1/sessions rejects stdio mcpServer with missing command → 400 invalid_options', async () => {
+  const res = await api('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: { mcpServers: { x: { type: 'stdio' } } },
+  })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'invalid_options')
+})
+
+test('POST /v1/sessions rejects http mcpServer with missing url → 400 invalid_options', async () => {
+  const res = await api('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: { mcpServers: { x: { type: 'http' } } },
+  })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'invalid_options')
+})
+
+test('POST /v1/sessions rejects mcpServer args containing non-strings → 400 invalid_options', async () => {
+  const res = await api('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: { mcpServers: { x: { type: 'stdio', command: 'foo', args: ['ok', 7] } } },
+  })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'invalid_options')
+})
+
+test('POST /v1/sessions rejects reserved mcpServers key wagent-delegate → 400 invalid_options', async () => {
+  const res = await api('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: {
+      mcpServers: { 'wagent-delegate': { type: 'http', url: 'https://shadow/mcp' } },
+    },
   })
   assert.equal(res.status, 400)
   const body = (await res.json()) as { error: { code: string } }

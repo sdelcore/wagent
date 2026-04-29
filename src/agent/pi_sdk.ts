@@ -191,9 +191,22 @@ export const piSdkFactory: AgentFactory = {
     //     appendSystemPrompt layers as a single extra string. (Pi's
     //     loader takes appendSystemPrompt as string[] — we wrap.)
     //   - allowedTools maps onto pi's `tools` allowlist.
+    //   - mcpServers is ignored: pi-coding-agent does not expose a
+    //     per-session MCP injection point (the upstream README is
+    //     explicit: "No MCP."). Surface a warn so callers can spot
+    //     the silent drop instead of assuming MCPs are wired up.
     // Anything not expressible on pi (none today, but future
     // option fields) is dropped silently with a debug log.
     const opts = session.options
+    if (opts?.mcpServers && Object.keys(opts.mcpServers).length > 0) {
+      deps.log.warn(
+        {
+          sessionId: session.id,
+          servers: Object.keys(opts.mcpServers),
+        },
+        'pi: options.mcpServers ignored — pi-coding-agent has no per-session MCP support',
+      )
+    }
     let resourceLoader: DefaultResourceLoader | undefined
     if (opts?.systemPrompt !== undefined || opts?.appendSystemPrompt !== undefined) {
       resourceLoader = new DefaultResourceLoader({

@@ -98,8 +98,9 @@ Internal (wagent ↔ harness):
 
 - **Claude** — `@anthropic-ai/claude-agent-sdk`'s `query({ prompt, options })`,
   in-process. The SDK manages the `claude` CLI child. Permissions
-  flow through `canUseTool`. MCP servers are passed in `options.mcpServers`
-  (used for the delegation endpoint).
+  flow through `canUseTool`. MCP servers are passed in `options.mcpServers`:
+  the per-spawn `wagent-delegate` server plus any caller-supplied
+  servers from `POST /v1/sessions { options: { mcpServers } }`.
 - **Pi** — `@mariozechner/pi-coding-agent`'s `createAgentSession()`,
   fully in-process. Events arrive via `session.subscribe(...)` and
   prompts through `session.prompt(...)`.
@@ -136,12 +137,22 @@ options?: {
   systemPrompt?: string         // replaces the harness's default prompt
   appendSystemPrompt?: string   // layered onto the harness's default
   allowedTools?: string[]       // tool-name allowlist
+  mcpServers?: Record<string, McpServerSpec>  // per-session MCP servers
 }
+
+// McpServerSpec mirrors the Claude Agent SDK's serializable shape:
+type McpServerSpec =
+  | { type?: 'stdio'; command: string; args?: string[]; env?: Record<string, string> }
+  | { type: 'http'; url: string; headers?: Record<string, string> }
+  | { type: 'sse';  url: string; headers?: Record<string, string> }
 ```
 
 Validation: each field passes through if provided, is omitted cleanly
 if not — wagent does not synthesize defaults. Unknown fields and
 non-string / non-array shapes are rejected with `400 invalid_options`.
+The reserved server name `wagent-delegate` cannot be used as a key in
+`mcpServers` — it's owned by wagent's per-spawn delegation channel and
+collisions return `400 invalid_options`.
 
 Per-adapter behavior:
 
@@ -150,6 +161,7 @@ Per-adapter behavior:
 | `systemPrompt` | passes through to `query({ options: { systemPrompt } })` (replaces preset) | applied via a `DefaultResourceLoader` with `systemPrompt` set (replaces pi's preset) | ignored |
 | `appendSystemPrompt` | wrapped as `{ type: 'preset', preset: 'claude_code', append }` | wrapped as `[appendSystemPrompt]` and passed to `DefaultResourceLoader.appendSystemPrompt` | ignored |
 | `allowedTools` | passes straight through to `query({ options: { allowedTools } })` | passes through to `createAgentSession({ tools })` | ignored |
+| `mcpServers` | merged into `query({ options: { mcpServers } })` alongside the per-spawn `wagent-delegate` server | ignored with a warn log — pi-coding-agent has no per-session MCP plumbing | ignored |
 
 If both `systemPrompt` and `appendSystemPrompt` are set, the
 replacement wins and the append is dropped with a warning log.
@@ -175,6 +187,10 @@ per-spawn token, loopback-only. See [delegation.md](./delegation.md).
   via parent/child links is in scope — see [delegation.md](./delegation.md).
   One session is still one harness.)
 - General MCP-server orchestration on behalf of harnesses. Harnesses
-  pick up user-configured MCP servers from their own configs. The
-  one exception is `wagent-delegate`, injected at spawn time so the
-  harness can call `delegate(...)`.
+  pick up user-configured MCP servers from their own configs. wagent
+  forwards two narrow categories on top of that: (a) the per-spawn
+  `wagent-delegate` server, injected so the harness can call
+  `delegate(...)`; (b) caller-supplied servers via
+  `options.mcpServers` on `POST /v1/sessions`, for the MCP-capable
+  harnesses that accept per-session injection (claude today). wagent
+  does not manage long-lived MCP server lifecycles.
