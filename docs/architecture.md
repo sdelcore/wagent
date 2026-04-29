@@ -19,7 +19,7 @@ and events live in SQLite.
 │  wagent (one process per host)                              │
 ├─────────────────────────────────────────────────────────────┤
 │  Fastify HTTP routes                                        │
-│    GET    /v1/health                                        │
+│    GET    /v1/health[?deep=1]                               │
 │    GET    /v1/meta                                          │
 │    GET    /v1/agents                                        │
 │    GET    /v1/sessions[?destroyed=true&parentSessionId=…]   │
@@ -68,6 +68,20 @@ and events live in SQLite.
        │  per session)        │    │  per session)        │
        └──────────────────────┘    └──────────────────────┘
 ```
+
+## Health
+
+`GET /v1/health` is shallow by default — it returns `{"status":"ok"}` as
+soon as Fastify has accepted the request, with no agent or DB probe.
+Pass `?deep=1` to run a one-shot **echo** round-trip (spawn the
+in-process `EchoAgent`, send a trivial prompt, wait for the `stop`
+event) before responding; this verifies the supervisor's factory
+wiring is reachable end-to-end without persisting a session row or
+events. The deep probe runs synchronously per request, has a 2s
+budget, and returns `503` with `{ status: "fail", deep: { stage,
+error, durationMs } }` on timeout or spawn failure. Use the deep mode
+as a `systemd` `After=` gate for downstream services that need wagent
+genuinely ready, not just listening.
 
 ## Wire
 
