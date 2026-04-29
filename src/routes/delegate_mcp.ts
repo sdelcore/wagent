@@ -3,6 +3,7 @@ import type { SessionStore } from '../sessions/store.js'
 import type { AgentSupervisor } from '../agent/supervisor.js'
 import type { DelegateTokenStore } from '../agent/delegate_tokens.js'
 import { probeAgent } from '../agent/availability.js'
+import { validateSessionOptions } from '../sessions/options.js'
 import {
   MAX_DELEGATION_DEPTH,
   type AgentKind,
@@ -262,6 +263,21 @@ const TOOL_DEFS = [
           description:
             "'sync' (default) blocks until the child stops. 'background' returns immediately so the parent can fan out and poll status with delegate_status. Background children survive past this tool call but are still cascade-destroyed when the parent session is destroyed.",
         },
+        options: {
+          type: 'object',
+          description:
+            'Per-child SessionOptions. Same shape and adapter forwarding rules as POST /v1/sessions { options }: systemPrompt / appendSystemPrompt / allowedTools / mcpServers / permissionMode / resume / forkSession. Useful when a parent needs to enforce a focused persona (system prompt + tool allowlist) on the child without round-tripping through `POST /v1/sessions`.',
+          properties: {
+            systemPrompt: { type: 'string' },
+            appendSystemPrompt: { type: 'string' },
+            allowedTools: { type: 'array', items: { type: 'string' } },
+            mcpServers: { type: 'object' },
+            permissionMode: { type: 'string', enum: ['default', 'ask', 'bypass'] },
+            resume: { type: 'string' },
+            forkSession: { type: 'boolean' },
+          },
+          additionalProperties: false,
+        },
       },
       required: ['harness', 'prompt'],
     },
@@ -304,6 +320,7 @@ interface DelegateArgs {
   cwd?: string
   model?: string
   mode?: DelegationMode
+  options?: unknown
 }
 
 interface DelegateStatusArgs {
@@ -339,7 +356,7 @@ async function runDelegate(
   if (!args || typeof args !== 'object') {
     return toolError('delegate: missing arguments')
   }
-  const { harness, prompt, cwd: cwdArg, model, mode: modeArg } = args
+  const { harness, prompt, cwd: cwdArg, model, mode: modeArg, options: optionsArg } = args
   if (!harness || !VALID_AGENTS.includes(harness)) {
     return toolError(`delegate: harness must be one of ${VALID_AGENTS.join(', ')}`)
   }
@@ -349,6 +366,13 @@ async function runDelegate(
   const mode: DelegationMode = modeArg === 'background' ? 'background' : 'sync'
   if (modeArg !== undefined && !VALID_MODES.includes(modeArg)) {
     return toolError(`delegate: mode must be one of ${VALID_MODES.join(', ')}`)
+  }
+  // Per-child SessionOptions — same shape, same validator, same error
+  // codes as POST /v1/sessions. Persisted on the child row so the
+  // adapter picks them up at spawn time.
+  const optionsResult = validateSessionOptions(optionsArg)
+  if (!optionsResult.ok) {
+    return toolError(`delegate: ${optionsResult.message}`)
   }
 
   const parent = deps.sessionStore.get(parentSessionId)
@@ -386,6 +410,7 @@ async function runDelegate(
     parentToolCallId: null,
     delegationDepth: parentDepth + 1,
     delegationMode: mode,
+    options: optionsResult.value,
   })
   app.log.info(
     {

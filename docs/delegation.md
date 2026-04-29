@@ -76,6 +76,7 @@ delegate({
   mode: 'sync' | 'background',    // default 'sync'
   scope?: { paths?: string[]; network?: boolean; shell?: boolean },
   maxTurns?: number,
+  options?: SessionOptions,       // per-child persona / tools / MCP / mode
 }) → {
   childSessionId: string,
   status: 'completed' | 'running' | 'failed',
@@ -89,6 +90,15 @@ delegate({
 - **Background** — returns immediately with
   `{ childSessionId, status: 'running' }`. Parent uses
   `delegate_status(id)` to poll, `delegate_cancel(id)` to abort.
+- **`options`** — same shape, same validator, and same per-adapter
+  forwarding rules as `POST /v1/sessions { options }`. See the
+  *Per-session options* table in [architecture.md](./architecture.md#per-session-options).
+  Useful when the parent wants to enforce a specific persona on the
+  child (e.g. a tool allowlist, replacement system prompt, or a
+  per-child MCP server set) without round-tripping through the
+  session-create endpoint. Validation errors surface as
+  `{ status: 'failed', error: 'delegate: options.<field> ...' }`,
+  same `invalid_options` codes as the route layer.
 
 The parent's own context only ever receives the final summary string
 (or `running`). Child transcript streaming back into parent context
