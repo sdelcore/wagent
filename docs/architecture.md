@@ -30,6 +30,7 @@ and events live in SQLite.
 │    GET    /v1/sessions/:id/events    (paged JSON history)   │
 │    GET    /v1/sessions/:id/events/stream  (SSE)             │
 │    GET    /v1/sessions/:id/descendants                      │
+│    POST   /v1/sessions/:id/fork      (cross-harness handoff) │
 │    POST   /v1/sessions/:id/message                          │
 │    POST   /v1/sessions/:id/abort                            │
 │    POST   /v1/sessions/:id/permissions/:requestId           │
@@ -229,6 +230,39 @@ replacement wins and the append is dropped with a warning log.
 Future option fields not natively supported by an adapter are
 ignored at that adapter only — the wire shape is the same for all
 agents.
+
+## Forking
+
+`POST /v1/sessions/:id/fork { agent, model?, mode?: "summary" | "transcript" }`
+
+Creates a new session of the requested harness, linked to the parent
+via `parentSessionId`, and seeds its first user message with context
+derived from the parent's events. Use this for failover (claude → pi
+when claude is rate-limited) or "switch model mid-conversation"
+without re-creating from scratch.
+
+- **`summary`** (default) — interleaved user + assistant text plus
+  one-line summaries of each tool call (`[used <name> (<status>)
+  with input <…>: <result snippet>]`). Tool inputs and outputs are
+  truncated to a bounded budget per item; the seed is conversational
+  context, not a wire replay.
+- **`transcript`** — verbatim concatenation of assistant text only.
+  No tool calls, no user text. Useful when the new harness can't
+  sensibly run prior tool history.
+
+Lossy by design: events do not replay, only context. The fork is a
+real session with its own event stream; the parent's event log is
+left intact.
+
+The new session is queryable through `GET /v1/sessions/:id/descendants`
+on the parent — same machinery delegated children use. Depth cap
+applies (`MAX_DELEGATION_DEPTH`). `delegationMode` is `null` on a
+fork: that field is for the delegate-MCP wait semantics, which a
+fork doesn't have.
+
+If you want a fresh session of harness X linked to a parent but with
+no carry-over context, use `POST /v1/sessions { parentSessionId }`
+instead — there is no `mode: "none"` variant of `/fork`.
 
 ## Auth
 

@@ -1030,6 +1030,210 @@ test('mcp: invalid bearer → 401', async () => {
 })
 
 // ----------------------------------------------------------------------------
+// Fork — POST /v1/sessions/:id/fork. Creates a parent-linked child of
+// any installed harness, seeded with a textual context handoff. Tested
+// against echo so we don't depend on Claude / pi auth.
+// ----------------------------------------------------------------------------
+
+test('fork: rejects unknown agent → 400 invalid_agent', async () => {
+  const parent = await json<ChildSession>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    alias: 'fork-bad-agent',
+  })
+  const res = await api('POST', `/v1/sessions/${parent.id}/fork`, {
+    agent: 'not-a-real-agent',
+  })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'invalid_agent')
+  await api('DELETE', `/v1/sessions/${parent.id}`)
+})
+
+test('fork: rejects unknown mode → 400 invalid_fork_mode', async () => {
+  const parent = await json<ChildSession>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    alias: 'fork-bad-mode',
+  })
+  const res = await api('POST', `/v1/sessions/${parent.id}/fork`, {
+    agent: 'echo',
+    mode: 'verbatim',
+  })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'invalid_fork_mode')
+  await api('DELETE', `/v1/sessions/${parent.id}`)
+})
+
+test('fork: missing parent → 404 not_found', async () => {
+  const res = await api('POST', '/v1/sessions/00000000-0000-0000-0000-000000000000/fork', {
+    agent: 'echo',
+  })
+  assert.equal(res.status, 404)
+})
+
+test('fork: depth cap rejects 4th level', async () => {
+  const root = await json<ChildSession>('POST', '/v1/sessions', { agent: 'echo', cwd: '/tmp' })
+  const d1 = await json<ChildSession>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    parentSessionId: root.id,
+  })
+  const d2 = await json<ChildSession>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    parentSessionId: d1.id,
+  })
+  const d3 = await json<ChildSession>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    parentSessionId: d2.id,
+  })
+  // d3 sits at depth 3 — forking it would put the fork at depth 4.
+  const res = await api('POST', `/v1/sessions/${d3.id}/fork`, { agent: 'echo' })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'depth_cap_exceeded')
+  await api('DELETE', `/v1/sessions/${root.id}`)
+})
+
+test('fork: summary mode seeds child + links via descendants', async () => {
+  // 1. Drive a turn on a parent so there's something to summarize.
+  const parent = await json<ChildSession>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    alias: 'fork-parent',
+  })
+  const parentEvents: SseEvent[] = []
+  const parentDone = streamUntil(
+    `${BASE}/v1/sessions/${parent.id}/events/stream`,
+    (e) => parentEvents.push(e),
+    (e) => e.data.kind === 'stop',
+    { timeoutMs: 10_000 },
+  )
+  await sleep(150)
+  await api('POST', `/v1/sessions/${parent.id}/message`, {
+    content: [{ type: 'text', text: 'hello, parent' }],
+  })
+  await parentDone
+
+  // 2. Fork it. Default mode is 'summary'.
+  const fork = await json<ChildSession>('POST', `/v1/sessions/${parent.id}/fork`, {
+    agent: 'echo',
+  })
+  assert.equal(fork.parentSessionId, parent.id)
+  assert.equal(fork.delegationDepth, parent.delegationDepth + 1)
+  // delegationMode is null on a fork — see docs/architecture.md.
+  assert.equal(fork.delegationMode, null)
+  assert.equal(fork.cwd, parent.cwd)
+
+  // 3. The fork should appear in the parent's descendants subtree.
+  const desc = await json<{ sessions: ChildSession[] }>(
+    'GET',
+    `/v1/sessions/${parent.id}/descendants`,
+  )
+  assert.ok(desc.sessions.some((s) => s.id === fork.id), 'fork missing from descendants')
+
+  // 4. The fork was auto-prompted with the seed text. Its first event
+  //    should be a user_message_chunk whose text references the parent.
+  const forkEvents = await json<{
+    events: { kind: string; payload: Record<string, unknown> }[]
+  }>('GET', `/v1/sessions/${fork.id}/events`)
+  const userMsg = forkEvents.events.find((e) => e.kind === 'user_message_chunk')
+  assert.ok(userMsg, 'fork has no user_message_chunk seed')
+  const content = userMsg!.payload.content as { type: string; text: string }[]
+  const text = content.find((c) => c.type === 'text')?.text ?? ''
+  assert.ok(text.includes('Forked from session'), `seed missing fork header: ${text.slice(0, 80)}`)
+  assert.ok(text.includes(parent.id), 'seed missing parent id')
+  assert.ok(text.includes('summary mode'), 'seed missing mode tag')
+
+  await api('DELETE', `/v1/sessions/${parent.id}`)
+})
+
+test('fork: transcript mode includes assistant text only', async () => {
+  // Parent: drive a turn so there's at least one assistant message.
+  const parent = await json<ChildSession>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    alias: 'fork-transcript',
+  })
+  const parentDone = streamUntil(
+    `${BASE}/v1/sessions/${parent.id}/events/stream`,
+    () => {},
+    (e) => e.data.kind === 'stop',
+    { timeoutMs: 10_000 },
+  )
+  await sleep(150)
+  await api('POST', `/v1/sessions/${parent.id}/message`, {
+    content: [{ type: 'text', text: 'transcript-test-input' }],
+  })
+  await parentDone
+
+  // Fork in transcript mode.
+  const fork = await json<ChildSession>('POST', `/v1/sessions/${parent.id}/fork`, {
+    agent: 'echo',
+    mode: 'transcript',
+  })
+
+  // The seed text should reference transcript mode and contain the
+  // echo agent's reply ("you said: transcript-test-input"), but not
+  // the user's own text framed as a U: line.
+  const forkEvents = await json<{
+    events: { kind: string; payload: Record<string, unknown> }[]
+  }>('GET', `/v1/sessions/${fork.id}/events`)
+  const userMsg = forkEvents.events.find((e) => e.kind === 'user_message_chunk')
+  assert.ok(userMsg, 'fork has no user_message_chunk seed')
+  const content = userMsg!.payload.content as { type: string; text: string }[]
+  const text = content.find((c) => c.type === 'text')?.text ?? ''
+  assert.ok(text.includes('transcript mode'), 'seed missing mode tag')
+  assert.ok(text.includes('you said: transcript-test-input'), 'transcript missing assistant reply')
+  // Transcript mode does NOT prefix lines with "U:" — that's summary only.
+  assert.ok(!text.includes('\nU: '), `transcript should not contain U: lines: ${text}`)
+
+  await api('DELETE', `/v1/sessions/${parent.id}`)
+})
+
+test('fork: empty parent → no auto-prompt, no events on fork', async () => {
+  // A parent that has never been prompted has no events to summarize.
+  // The fork row should still be created and parent-linked, but the
+  // child should have no auto-seed (zero events on it).
+  const parent = await json<ChildSession>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    alias: 'fork-empty-parent',
+  })
+  const fork = await json<ChildSession>('POST', `/v1/sessions/${parent.id}/fork`, {
+    agent: 'echo',
+  })
+  assert.equal(fork.parentSessionId, parent.id)
+
+  const forkEvents = await json<{ events: unknown[] }>(
+    'GET',
+    `/v1/sessions/${fork.id}/events`,
+  )
+  assert.equal(forkEvents.events.length, 0, 'empty-parent fork should not be auto-prompted')
+
+  await api('DELETE', `/v1/sessions/${parent.id}`)
+})
+
+test('fork: parent_destroyed → 410', async () => {
+  const parent = await json<ChildSession>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+  })
+  await api('DELETE', `/v1/sessions/${parent.id}`)
+  // After hard-delete the row is gone, so we get 404 (parent_not_found).
+  // The 410/parent_destroyed branch fires only while a row is still
+  // present with destroyed_at set — wagent doesn't soft-delete today,
+  // so we test the 404 path here, which is the live behavior.
+  const res = await api('POST', `/v1/sessions/${parent.id}/fork`, {
+    agent: 'echo',
+  })
+  assert.equal(res.status, 404)
+})
+
+// ----------------------------------------------------------------------------
 // Claude end-to-end — opt-in via CLAUDE_E2E=1 or RUN_ALL=1.
 // Needs working Claude auth (subscription OAuth at ~/.claude/ or
 // ANTHROPIC_API_KEY). Sends a single trivial prompt and asserts the
