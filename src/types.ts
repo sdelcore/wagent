@@ -6,13 +6,48 @@ export type DelegationMode = 'sync' | 'background'
 
 export const MAX_DELEGATION_DEPTH = 3
 
+// MCP server transports accepted on the wire. Mirrors the Claude
+// Agent SDK's serializable `McpServerConfig` shape (the non-serializable
+// `sdk` instance variant has no wire representation). Forwarded as-is
+// into harnesses that support per-session MCP injection.
+export interface McpStdioServerConfig {
+  type?: 'stdio'
+  command: string
+  args?: string[]
+  env?: Record<string, string>
+}
+
+export interface McpHttpServerConfig {
+  type: 'http'
+  url: string
+  headers?: Record<string, string>
+}
+
+export interface McpSseServerConfig {
+  type: 'sse'
+  url: string
+  headers?: Record<string, string>
+}
+
+export type McpServerSpec =
+  | McpStdioServerConfig
+  | McpHttpServerConfig
+  | McpSseServerConfig
+
+// Reserved server name. Caller-supplied `mcpServers` may not use this
+// key — it's owned by wagent's per-spawn delegation channel and is
+// injected automatically when delegation is wired up.
+export const RESERVED_MCP_SERVER_NAME = 'wagent-delegate'
+
 // Per-session knobs that mirror the Claude Agent SDK's `query({ options })`
 // shape. Forwarded into the underlying harness at spawn time. Each
 // adapter forwards what it can natively express and ignores the rest:
-//   - claude: all three pass straight through to the SDK.
+//   - claude: all four pass straight through to the SDK; mcpServers
+//             merges alongside the per-spawn `wagent-delegate` server.
 //   - pi:     systemPrompt / appendSystemPrompt map onto pi's
 //             DefaultResourceLoader; allowedTools maps onto pi's
-//             `tools` allowlist.
+//             `tools` allowlist; mcpServers is ignored — pi-coding-agent
+//             does not expose per-session MCP injection.
 //   - echo:   ignored (echo has no model or tools).
 // Validation policy: pass through if provided, omit cleanly if not —
 // wagent does not synthesize defaults.
@@ -20,6 +55,7 @@ export interface SessionOptions {
   systemPrompt?: string
   appendSystemPrompt?: string
   allowedTools?: string[]
+  mcpServers?: Record<string, McpServerSpec>
 }
 
 export interface Session {

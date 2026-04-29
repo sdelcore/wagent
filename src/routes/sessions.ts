@@ -6,9 +6,11 @@ import type { AgentSupervisor } from '../agent/supervisor.js'
 import { probeAgent } from '../agent/availability.js'
 import {
   MAX_DELEGATION_DEPTH,
+  RESERVED_MCP_SERVER_NAME,
   type AgentKind,
   type ApiError,
   type DelegationMode,
+  type McpServerSpec,
   type SessionOptions,
 } from '../types.js'
 
@@ -69,15 +71,142 @@ function validateSessionOptions(raw: unknown): ValidatedOptions {
     }
     out.allowedTools = obj.allowedTools as string[]
   }
+  if (obj.mcpServers !== undefined) {
+    const validated = validateMcpServers(obj.mcpServers)
+    if (!validated.ok) return validated
+    // Collapse `mcpServers: {}` to absent — same treatment as the
+    // empty-options-object → null collapse below.
+    if (Object.keys(validated.value).length > 0) {
+      out.mcpServers = validated.value
+    }
+  }
   // Empty object → null so we don't persist an empty JSON blob.
   if (
     out.systemPrompt === undefined &&
     out.appendSystemPrompt === undefined &&
-    out.allowedTools === undefined
+    out.allowedTools === undefined &&
+    out.mcpServers === undefined
   ) {
     return { ok: true, value: null }
   }
   return { ok: true, value: out }
+}
+
+type ValidatedMcpServers =
+  | { ok: true; value: Record<string, McpServerSpec> }
+  | { ok: false; code: string; message: string }
+
+// Validate options.mcpServers — a record keyed by server name with
+// stdio / http / sse transports. Mirrors the Claude Agent SDK's
+// serializable McpServerConfig shape; the non-serializable `sdk`
+// instance variant is intentionally not accepted here (it has no wire
+// representation). The reserved key `wagent-delegate` is rejected so
+// callers can't shadow wagent's per-spawn delegation channel.
+function validateMcpServers(raw: unknown): ValidatedMcpServers {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return {
+      ok: false,
+      code: 'invalid_options',
+      message: 'options.mcpServers must be an object keyed by server name',
+    }
+  }
+  const out: Record<string, McpServerSpec> = {}
+  for (const [name, spec] of Object.entries(raw)) {
+    if (name === RESERVED_MCP_SERVER_NAME) {
+      return {
+        ok: false,
+        code: 'invalid_options',
+        message: `options.mcpServers["${RESERVED_MCP_SERVER_NAME}"] is reserved by wagent`,
+      }
+    }
+    const validated = validateMcpServer(name, spec)
+    if (!validated.ok) return validated
+    out[name] = validated.value
+  }
+  return { ok: true, value: out }
+}
+
+type ValidatedMcpServer =
+  | { ok: true; value: McpServerSpec }
+  | { ok: false; code: string; message: string }
+
+function validateMcpServer(name: string, raw: unknown): ValidatedMcpServer {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return {
+      ok: false,
+      code: 'invalid_options',
+      message: `options.mcpServers["${name}"] must be an object`,
+    }
+  }
+  const spec = raw as Record<string, unknown>
+  // Default transport when `type` is omitted is stdio (matches the SDK).
+  const type = spec.type === undefined ? 'stdio' : spec.type
+  if (type !== 'stdio' && type !== 'http' && type !== 'sse') {
+    return {
+      ok: false,
+      code: 'invalid_options',
+      message: `options.mcpServers["${name}"].type must be one of stdio, http, sse`,
+    }
+  }
+  if (type === 'stdio') {
+    if (typeof spec.command !== 'string' || spec.command.length === 0) {
+      return {
+        ok: false,
+        code: 'invalid_options',
+        message: `options.mcpServers["${name}"].command must be a non-empty string`,
+      }
+    }
+    if (
+      spec.args !== undefined &&
+      (!Array.isArray(spec.args) || !spec.args.every((a) => typeof a === 'string'))
+    ) {
+      return {
+        ok: false,
+        code: 'invalid_options',
+        message: `options.mcpServers["${name}"].args must be an array of strings`,
+      }
+    }
+    if (spec.env !== undefined && !isStringRecord(spec.env)) {
+      return {
+        ok: false,
+        code: 'invalid_options',
+        message: `options.mcpServers["${name}"].env must be a string-to-string record`,
+      }
+    }
+    const value: McpServerSpec = {
+      type: 'stdio',
+      command: spec.command,
+      ...(spec.args !== undefined ? { args: spec.args as string[] } : {}),
+      ...(spec.env !== undefined ? { env: spec.env as Record<string, string> } : {}),
+    }
+    return { ok: true, value }
+  }
+  // http or sse — same validation shape.
+  if (typeof spec.url !== 'string' || spec.url.length === 0) {
+    return {
+      ok: false,
+      code: 'invalid_options',
+      message: `options.mcpServers["${name}"].url must be a non-empty string`,
+    }
+  }
+  if (spec.headers !== undefined && !isStringRecord(spec.headers)) {
+    return {
+      ok: false,
+      code: 'invalid_options',
+      message: `options.mcpServers["${name}"].headers must be a string-to-string record`,
+    }
+  }
+  const value: McpServerSpec = {
+    type,
+    url: spec.url,
+    ...(spec.headers !== undefined ? { headers: spec.headers as Record<string, string> } : {}),
+  }
+  return { ok: true, value }
+}
+
+function isStringRecord(v: unknown): v is Record<string, string> {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return false
+  return Object.values(v as Record<string, unknown>).every((x) => typeof x === 'string')
 }
 
 export interface SessionsDeps {
