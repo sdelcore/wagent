@@ -440,6 +440,17 @@ class ClaudeSdkAgent implements AgentProcess {
         ? { allowedTools: sessionOpts.allowedTools }
         : {}),
       ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
+      // resume picks up an existing Claude Code transcript by session
+      // UUID — the SDK loads it from `~/.claude/projects/<encoded
+      // cwd>/<uuid>.jsonl`, so cwd above must match the cwd of the
+      // original CLI invocation. forkSession (only meaningful with
+      // resume; the route layer rejects it standalone) tells the SDK
+      // to branch to a new session id instead of appending to the
+      // original JSONL.
+      ...(sessionOpts?.resume !== undefined ? { resume: sessionOpts.resume } : {}),
+      ...(sessionOpts?.forkSession !== undefined
+        ? { forkSession: sessionOpts.forkSession }
+        : {}),
       ...(detectClaudeExecutable()
         ? { pathToClaudeCodeExecutable: detectClaudeExecutable()! }
         : {}),

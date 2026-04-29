@@ -108,13 +108,45 @@ function validateSessionOptions(raw: unknown): ValidatedOptions {
     }
     out.permissionMode = obj.permissionMode as PermissionMode
   }
+  if (obj.resume !== undefined) {
+    if (typeof obj.resume !== 'string' || obj.resume.length === 0) {
+      return {
+        ok: false,
+        code: 'invalid_options',
+        message: 'options.resume must be a non-empty Claude Code session UUID string',
+      }
+    }
+    out.resume = obj.resume
+  }
+  if (obj.forkSession !== undefined) {
+    if (typeof obj.forkSession !== 'boolean') {
+      return {
+        ok: false,
+        code: 'invalid_options',
+        message: 'options.forkSession must be a boolean',
+      }
+    }
+    if (obj.forkSession && out.resume === undefined) {
+      // forkSession is meaningful only alongside resume — without an
+      // anchor session the SDK has nothing to fork from. Reject early
+      // so the caller doesn't silently get a normal fresh session.
+      return {
+        ok: false,
+        code: 'invalid_options',
+        message: 'options.forkSession requires options.resume to be set',
+      }
+    }
+    out.forkSession = obj.forkSession
+  }
   // Empty object → null so we don't persist an empty JSON blob.
   if (
     out.systemPrompt === undefined &&
     out.appendSystemPrompt === undefined &&
     out.allowedTools === undefined &&
     out.mcpServers === undefined &&
-    out.permissionMode === undefined
+    out.permissionMode === undefined &&
+    out.resume === undefined &&
+    out.forkSession === undefined
   ) {
     return { ok: true, value: null }
   }

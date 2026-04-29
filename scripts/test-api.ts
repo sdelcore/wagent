@@ -99,6 +99,8 @@ interface Session {
       | { type: 'sse'; url: string; headers?: Record<string, string> }
     >
     permissionMode?: 'default' | 'ask' | 'bypass'
+    resume?: string
+    forkSession?: boolean
   } | null
 }
 
@@ -397,6 +399,79 @@ test('POST /v1/sessions rejects unknown permissionMode → 400 invalid_options',
   assert.equal(res.status, 400)
   const body = (await res.json()) as { error: { code: string } }
   assert.equal(body.error.code, 'invalid_options')
+})
+
+test('POST /v1/sessions persists options.resume + options.forkSession', async () => {
+  const created = await json<Session>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: {
+      resume: '2a72f723-8849-48a3-8f3a-c1c62db7a344',
+      forkSession: true,
+    },
+  })
+  assert.deepEqual(created.options, {
+    resume: '2a72f723-8849-48a3-8f3a-c1c62db7a344',
+    forkSession: true,
+  })
+  const got = await json<Session>('GET', `/v1/sessions/${created.id}`)
+  assert.deepEqual(got.options, created.options)
+  await api('DELETE', `/v1/sessions/${created.id}`)
+})
+
+test('POST /v1/sessions rejects non-string resume → 400 invalid_options', async () => {
+  const res = await api('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: { resume: 42 },
+  })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'invalid_options')
+})
+
+test('POST /v1/sessions rejects empty resume string → 400 invalid_options', async () => {
+  const res = await api('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: { resume: '' },
+  })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'invalid_options')
+})
+
+test('POST /v1/sessions rejects forkSession without resume → 400 invalid_options', async () => {
+  const res = await api('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: { forkSession: true },
+  })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'invalid_options')
+})
+
+test('POST /v1/sessions rejects non-boolean forkSession → 400 invalid_options', async () => {
+  const res = await api('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: { resume: 'abc', forkSession: 'yes' },
+  })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'invalid_options')
+})
+
+test('POST /v1/sessions allows forkSession: false standalone (no-op, not persisted unless resume set)', async () => {
+  // forkSession: false is a no-op without resume — accepted, persisted as-is.
+  const created = await json<Session>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: { forkSession: false },
+  })
+  assert.deepEqual(created.options, { forkSession: false })
+  await api('DELETE', `/v1/sessions/${created.id}`)
 })
 
 test('POST /v1/sessions rejects unknown mcpServers transport type → 400 invalid_options', async () => {
