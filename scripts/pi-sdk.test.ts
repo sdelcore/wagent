@@ -6,7 +6,12 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { translatePiEvent, type PiTranslationContext } from '../src/agent/pi_sdk.js'
+import {
+  classifyPiErrorMessage,
+  errorPayloadToUpdate,
+  translatePiEvent,
+  type PiTranslationContext,
+} from '../src/agent/pi_sdk.js'
 import type { AgentSessionEvent } from '@mariozechner/pi-coding-agent'
 
 function ctx(): PiTranslationContext {
@@ -144,7 +149,7 @@ test('agent lifecycle events (turn_end, agent_end, etc.) emit nothing', () => {
   }
 })
 
-test('session-management events (queue_update, compaction_*, retry_*) emit nothing', () => {
+test('session-management events (queue_update, compaction_*, auto_retry_end) emit nothing', () => {
   const c = ctx()
   const noisyEvents = [
     { type: 'queue_update', steering: [], followUp: [] },
@@ -155,13 +160,6 @@ test('session-management events (queue_update, compaction_*, retry_*) emit nothi
       result: undefined,
       aborted: false,
       willRetry: false,
-    },
-    {
-      type: 'auto_retry_start',
-      attempt: 1,
-      maxAttempts: 3,
-      delayMs: 1000,
-      errorMessage: 'rate limited',
     },
     { type: 'auto_retry_end', success: true, attempt: 1 },
   ] as unknown as AgentSessionEvent[]
@@ -201,4 +199,119 @@ test('messageId rotates on the next message_start', () => {
   const second = c.messageId
   assert.ok(first && second)
   assert.notEqual(first, second, 'messageId should change between assistant messages')
+})
+
+// ---------------------------------------------------------------------------
+// Error classification + emission
+// ---------------------------------------------------------------------------
+
+test('classifyPiErrorMessage: rate-limit substring → rate_limit, retryable', () => {
+  const p = classifyPiErrorMessage('Anthropic rate limit exceeded, try again later')
+  assert.equal(p.category, 'rate_limit')
+  assert.equal(p.retryable, true)
+})
+
+test('classifyPiErrorMessage: 429 in message → rate_limit', () => {
+  const p = classifyPiErrorMessage('HTTP 429 from upstream')
+  assert.equal(p.category, 'rate_limit')
+})
+
+test('classifyPiErrorMessage: quota substring → quota, not retryable', () => {
+  const p = classifyPiErrorMessage('Out of credit, please top up')
+  assert.equal(p.category, 'quota')
+  assert.equal(p.retryable, false)
+})
+
+test('classifyPiErrorMessage: 401 / unauthorized → auth', () => {
+  assert.equal(classifyPiErrorMessage('401 Unauthorized').category, 'auth')
+  assert.equal(classifyPiErrorMessage('Invalid API key').category, 'auth')
+})
+
+test('classifyPiErrorMessage: overloaded / 5xx → upstream_5xx, retryable', () => {
+  const p = classifyPiErrorMessage('Anthropic overloaded')
+  assert.equal(p.category, 'upstream_5xx')
+  assert.equal(p.retryable, true)
+})
+
+test('classifyPiErrorMessage: ECONNRESET / network → transport', () => {
+  assert.equal(classifyPiErrorMessage('ECONNRESET').category, 'transport')
+  assert.equal(classifyPiErrorMessage('fetch failed').category, 'transport')
+})
+
+test('classifyPiErrorMessage: unknown text → internal', () => {
+  const p = classifyPiErrorMessage('something weird happened')
+  assert.equal(p.category, 'internal')
+  assert.equal(p.retryable, false)
+})
+
+test('classifyPiErrorMessage: empty / undefined → internal with default message', () => {
+  assert.equal(classifyPiErrorMessage(undefined).category, 'internal')
+  assert.equal(classifyPiErrorMessage('').category, 'internal')
+})
+
+test('translatePiEvent: message_update error → typed error event', () => {
+  const c = ctx()
+  const out = translatePiEvent(
+    {
+      type: 'message_update',
+      assistantMessageEvent: {
+        type: 'error',
+        reason: 'error',
+        error: {
+          role: 'assistant',
+          content: [],
+          stopReason: 'error',
+          errorMessage: 'rate limit exceeded',
+        },
+      },
+    } as unknown as AgentSessionEvent,
+    c,
+  )
+  assert.ok(out)
+  assert.equal((out as { kind: string }).kind, 'error')
+  assert.equal((out as { category: string }).category, 'rate_limit')
+})
+
+test('translatePiEvent: message_update aborted does NOT emit error (clean cancel)', () => {
+  const out = translatePiEvent(
+    {
+      type: 'message_update',
+      assistantMessageEvent: {
+        type: 'error',
+        reason: 'aborted',
+        error: { role: 'assistant', content: [], stopReason: 'aborted' },
+      },
+    } as unknown as AgentSessionEvent,
+    ctx(),
+  )
+  assert.equal(out, null)
+})
+
+test('translatePiEvent: auto_retry_start emits a retryable error event', () => {
+  const out = translatePiEvent(
+    {
+      type: 'auto_retry_start',
+      attempt: 1,
+      maxAttempts: 3,
+      delayMs: 1000,
+      errorMessage: 'overloaded',
+    } as unknown as AgentSessionEvent,
+    ctx(),
+  )
+  assert.ok(out)
+  assert.equal((out as { kind: string }).kind, 'error')
+  assert.equal((out as { category: string }).category, 'upstream_5xx')
+  assert.equal((out as { retryable: boolean }).retryable, true)
+})
+
+test('errorPayloadToUpdate (pi) shape matches wire contract', () => {
+  const u = errorPayloadToUpdate({
+    category: 'rate_limit',
+    retryable: true,
+    message: 'slow down',
+  })
+  assert.equal(u.kind, 'error')
+  assert.equal(u.category, 'rate_limit')
+  assert.equal(u.retryable, true)
+  assert.equal(u.message, 'slow down')
 })

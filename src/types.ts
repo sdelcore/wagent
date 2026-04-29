@@ -111,6 +111,36 @@ export type SessionUpdateKind =
   | 'subprocess_died'
   | 'session_destroyed'
   | 'usage_update'
+  | 'error'
+
+// Classification for an `error` event. Callers (e.g. failover policies)
+// branch on this rather than string-matching adapter stderr. Adapters
+// classify what they can confidently recognise; everything else is
+// `internal`.
+//
+//   rate_limit    HTTP 429 / typed rate-limit error from upstream
+//   auth          HTTP 401 / 403 / typed auth-failure
+//   quota         HTTP 402 / billing / overage exhausted
+//   upstream_5xx  HTTP 5xx from the model provider
+//   transport     TCP / TLS / DNS / fetch abort that's not a clean cancel
+//   internal      anything wagent can't classify
+export type ErrorCategory =
+  | 'rate_limit'
+  | 'auth'
+  | 'quota'
+  | 'upstream_5xx'
+  | 'transport'
+  | 'internal'
+
+// Payload shape for the `error` SessionUpdate. Always emitted alongside
+// (or just before) a terminal event — `error` is purely informational
+// classification; the turn still ends via `stop` / `subprocess_died`.
+export interface ErrorPayload {
+  category: ErrorCategory
+  retryable: boolean
+  retryAfterMs?: number
+  message: string
+}
 
 // Token usage snapshot. Adapters emit this in a `usage_update` event
 // when the underlying harness reports it. All counts are cumulative

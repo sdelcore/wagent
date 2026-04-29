@@ -13,6 +13,7 @@ import type { ImageContent } from '@mariozechner/pi-ai'
 import type { AgentFactory, AgentProcess, AgentSpawnDeps } from './process.js'
 import type {
   ContentBlock as WireContent,
+  ErrorPayload,
   PermissionOutcome,
   Session,
   SessionUpdate,
@@ -23,6 +24,71 @@ import type {
 // message share an id (matches the existing wire semantics).
 export interface PiTranslationContext {
   messageId: string | null
+}
+
+// Pi exposes errors as opaque strings (AssistantMessage.errorMessage,
+// auto_retry_start.errorMessage). Best-effort classification: match the
+// obvious cases via lower-cased substring, default to internal. Callers
+// that need stronger guarantees should rely on the claude adapter's
+// typed signal or read the message text.
+export function classifyPiErrorMessage(raw: string | undefined): ErrorPayload {
+  const message = raw?.trim() || 'pi reported an error'
+  const lower = message.toLowerCase()
+  if (lower.includes('rate limit') || lower.includes('rate-limit') || lower.includes('429')) {
+    return { category: 'rate_limit', retryable: true, message }
+  }
+  if (
+    lower.includes('quota') ||
+    lower.includes('billing') ||
+    lower.includes('payment required') ||
+    lower.includes('credit')
+  ) {
+    return { category: 'quota', retryable: false, message }
+  }
+  if (
+    lower.includes('unauthorized') ||
+    lower.includes('forbidden') ||
+    lower.includes('401') ||
+    lower.includes('403') ||
+    lower.includes('invalid api key') ||
+    lower.includes('authentication')
+  ) {
+    return { category: 'auth', retryable: false, message }
+  }
+  if (
+    lower.includes('overloaded') ||
+    lower.includes('500') ||
+    lower.includes('502') ||
+    lower.includes('503') ||
+    lower.includes('504') ||
+    lower.includes('upstream') ||
+    lower.includes('server error')
+  ) {
+    return { category: 'upstream_5xx', retryable: true, message }
+  }
+  if (
+    lower.includes('econnreset') ||
+    lower.includes('etimedout') ||
+    lower.includes('enotfound') ||
+    lower.includes('network') ||
+    lower.includes('socket hang up') ||
+    lower.includes('fetch failed')
+  ) {
+    return { category: 'transport', retryable: true, message }
+  }
+  return { category: 'internal', retryable: false, message }
+}
+
+// Build the wire-shaped SessionUpdate for a classified error.
+export function errorPayloadToUpdate(payload: ErrorPayload): SessionUpdate {
+  const out: SessionUpdate = {
+    kind: 'error',
+    category: payload.category,
+    retryable: payload.retryable,
+    message: payload.message,
+  }
+  if (payload.retryAfterMs !== undefined) out.retryAfterMs = payload.retryAfterMs
+  return out
 }
 
 // Pure translation from a pi AgentSessionEvent to a wagent
@@ -53,9 +119,30 @@ export function translatePiEvent(
           text: inner.delta,
         }
       }
+      // pi terminates a failed stream with an `error` event whose payload
+      // carries the final AssistantMessage. Pi has no typed category, so
+      // we string-match for the obvious ones and fall back to internal.
+      // The terminal stop event still follows from prompt() resolution.
+      if (inner.type === 'error') {
+        const reason = (inner as { reason?: string }).reason
+        if (reason === 'aborted') return null
+        const errMsg = (inner as { error?: { errorMessage?: string } }).error?.errorMessage
+        return errorPayloadToUpdate(classifyPiErrorMessage(errMsg))
+      }
       // tool_call deltas are summarized via tool_execution_* events
       // below; ignore the per-arg streaming chunks.
       return null
+    }
+
+    // pi auto-retries internally on transient failures (overloaded, rate
+    // limit, server error). We surface this as a retryable `error` so
+    // callers can observe attempt N of M without driving failover yet —
+    // pi may recover on its own. The terminal stop event only fires if
+    // every retry fails.
+    case 'auto_retry_start': {
+      const e = event as { errorMessage?: string }
+      const classified = classifyPiErrorMessage(e.errorMessage)
+      return errorPayloadToUpdate({ ...classified, retryable: true })
     }
 
     case 'tool_execution_start':
@@ -133,6 +220,14 @@ class PiSdkAgent implements AgentProcess {
       })
     } catch (err) {
       this.deps.log.error({ err }, 'pi prompt failed')
+      // Per pi-agent-core's contract failures should arrive as in-stream
+      // `error` events (already translated above). Anything thrown here
+      // is exceptional — surface it as `internal` unless the message
+      // matches a known pattern, then terminate the turn.
+      if (!this.aborted) {
+        const message = err instanceof Error ? err.message : String(err)
+        this.deps.emit(errorPayloadToUpdate(classifyPiErrorMessage(message)))
+      }
       this.deps.emit({
         kind: 'stop',
         reason: this.aborted ? 'cancelled' : 'error',
