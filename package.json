@@ -13,8 +13,8 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "smoke": "tsx scripts/smoke.ts",
-    "test": "node --import tsx --test scripts/pi-sdk.test.ts scripts/claude-sdk.test.ts scripts/session-options.test.ts scripts/test-api.ts",
-    "test:unit": "node --import tsx --test scripts/pi-sdk.test.ts scripts/claude-sdk.test.ts scripts/session-options.test.ts"
+    "test": "node --import tsx --test scripts/pi-sdk.test.ts scripts/claude-sdk.test.ts scripts/session-options.test.ts scripts/create-session.test.ts scripts/test-api.ts",
+    "test:unit": "node --import tsx --test scripts/pi-sdk.test.ts scripts/claude-sdk.test.ts scripts/session-options.test.ts scripts/create-session.test.ts"
   },
   "repository": {
     "type": "git",
