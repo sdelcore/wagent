@@ -42,20 +42,37 @@ export const RESERVED_MCP_SERVER_NAME = 'wagent-delegate'
 // Per-session knobs that mirror the Claude Agent SDK's `query({ options })`
 // shape. Forwarded into the underlying harness at spawn time. Each
 // adapter forwards what it can natively express and ignores the rest:
-//   - claude: all four pass straight through to the SDK; mcpServers
-//             merges alongside the per-spawn `wagent-delegate` server.
+//   - claude: all five pass straight through to the SDK; mcpServers
+//             merges alongside the per-spawn `wagent-delegate` server;
+//             permissionMode controls whether tool calls round-trip
+//             through wagent's permission API.
 //   - pi:     systemPrompt / appendSystemPrompt map onto pi's
 //             DefaultResourceLoader; allowedTools maps onto pi's
-//             `tools` allowlist; mcpServers is ignored — pi-coding-agent
-//             does not expose per-session MCP injection.
+//             `tools` allowlist; mcpServers and permissionMode are
+//             ignored (pi-coding-agent has no per-session MCP hook
+//             and runs without a permission gate today).
 //   - echo:   ignored (echo has no model or tools).
 // Validation policy: pass through if provided, omit cleanly if not —
 // wagent does not synthesize defaults.
+//
+// permissionMode semantics (claude only):
+//   - 'default' / 'ask' / unset: every tool call surfaces as a
+//     `permission_request` event that the caller must resolve via
+//     POST /v1/sessions/:id/permissions/:requestId. This is wagent's
+//     baseline contract.
+//   - 'bypass': sets the underlying SDK to `bypassPermissions` and
+//     skips wagent's `canUseTool` round-trip entirely. Intended for
+//     callers (e.g. ARIA) that enforce tool-use policy upstream and
+//     don't want each tool gated through wagent. Equivalent to
+//     `claude --permission-mode bypassPermissions`.
+export type PermissionMode = 'default' | 'ask' | 'bypass'
+
 export interface SessionOptions {
   systemPrompt?: string
   appendSystemPrompt?: string
   allowedTools?: string[]
   mcpServers?: Record<string, McpServerSpec>
+  permissionMode?: PermissionMode
 }
 
 export interface Session {
