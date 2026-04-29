@@ -427,24 +427,7 @@ async function runDelegate(
   }
 
   // Sync mode: subscribe before spawning so we don't miss any events.
-  let finalText = ''
-  let stopReason: string | null = null
-  const stopPromise = new Promise<void>((resolve) => {
-    const unsubscribe = deps.bus.subscribe(child.id, (ev) => {
-      const payload = ev.payload as SessionUpdate & { text?: string; reason?: string }
-      if (payload.kind === 'agent_message_chunk' && typeof payload.text === 'string') {
-        finalText += payload.text
-      } else if (payload.kind === 'stop') {
-        stopReason = payload.reason ?? 'end_turn'
-        unsubscribe()
-        resolve()
-      } else if (payload.kind === 'subprocess_died' || payload.kind === 'session_destroyed') {
-        stopReason = payload.kind
-        unsubscribe()
-        resolve()
-      }
-    })
-  })
+  const turn = awaitTurn(deps.bus, child.id)
 
   let proc
   try {
@@ -461,7 +444,7 @@ async function runDelegate(
     app.log.error({ err, childId: child.id }, 'delegate: child prompt failed')
   })
 
-  await stopPromise
+  const { finalText, stopReason } = await turn
 
   const text = finalText.length > 0 ? finalText : `(child stopped: ${stopReason})`
   return {
@@ -583,4 +566,30 @@ async function runDelegateCancel(
     content: [{ type: 'text', text: `(cancel requested for ${child.id})` }],
     structuredContent: { status: 'cancelling', childSessionId: child.id },
   }
+}
+
+interface TurnResult {
+  finalText: string
+  stopReason: string
+}
+
+// Subscribe to a child's bus, accumulate assistant text, resolve when
+// the session reaches a terminal event. Caller must invoke this before
+// spawning so no early events are missed.
+function awaitTurn(bus: SessionBus, childSessionId: string): Promise<TurnResult> {
+  return new Promise<TurnResult>((resolve) => {
+    let finalText = ''
+    const unsubscribe = bus.subscribe(childSessionId, (ev) => {
+      const payload = ev.payload as SessionUpdate & { text?: string; reason?: string }
+      if (payload.kind === 'agent_message_chunk' && typeof payload.text === 'string') {
+        finalText += payload.text
+      } else if (payload.kind === 'stop') {
+        unsubscribe()
+        resolve({ finalText, stopReason: payload.reason ?? 'end_turn' })
+      } else if (payload.kind === 'subprocess_died' || payload.kind === 'session_destroyed') {
+        unsubscribe()
+        resolve({ finalText, stopReason: payload.kind })
+      }
+    })
+  })
 }
