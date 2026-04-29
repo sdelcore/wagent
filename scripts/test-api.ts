@@ -88,6 +88,11 @@ interface Session {
   createdAt: number
   updatedAt: number
   destroyedAt: number | null
+  options: {
+    systemPrompt?: string
+    appendSystemPrompt?: string
+    allowedTools?: string[]
+  } | null
 }
 
 async function api(method: string, path: string, body?: unknown): Promise<Response> {
@@ -229,6 +234,76 @@ test('POST /v1/sessions rejects unknown agent → 400 invalid_agent', async () =
   assert.equal(res.status, 400)
   const body = (await res.json()) as { error: { code: string } }
   assert.equal(body.error.code, 'invalid_agent')
+})
+
+test('POST /v1/sessions persists options when provided', async () => {
+  const created = await json<Session>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: {
+      systemPrompt: 'route only',
+      appendSystemPrompt: 'be terse',
+      allowedTools: ['Task', 'mcp__recall__*'],
+    },
+  })
+  assert.deepEqual(created.options, {
+    systemPrompt: 'route only',
+    appendSystemPrompt: 'be terse',
+    allowedTools: ['Task', 'mcp__recall__*'],
+  })
+  // Round-trip through GET
+  const got = await json<Session>('GET', `/v1/sessions/${created.id}`)
+  assert.deepEqual(got.options, created.options)
+  await api('DELETE', `/v1/sessions/${created.id}`)
+})
+
+test('POST /v1/sessions options omitted → options is null', async () => {
+  const created = await json<Session>('POST', '/v1/sessions', { agent: 'echo', cwd: '/tmp' })
+  assert.equal(created.options, null)
+  await api('DELETE', `/v1/sessions/${created.id}`)
+})
+
+test('POST /v1/sessions empty options object → options is null', async () => {
+  const created = await json<Session>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: {},
+  })
+  assert.equal(created.options, null)
+  await api('DELETE', `/v1/sessions/${created.id}`)
+})
+
+test('POST /v1/sessions rejects non-object options → 400 invalid_options', async () => {
+  const res = await api('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: 'nope',
+  })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'invalid_options')
+})
+
+test('POST /v1/sessions rejects non-string systemPrompt → 400 invalid_options', async () => {
+  const res = await api('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: { systemPrompt: 123 },
+  })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'invalid_options')
+})
+
+test('POST /v1/sessions rejects non-string-array allowedTools → 400 invalid_options', async () => {
+  const res = await api('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: { allowedTools: ['ok', 7] },
+  })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'invalid_options')
 })
 
 test('POST /v1/sessions accepts an installed agent (pi via SDK)', async () => {

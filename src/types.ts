@@ -6,6 +6,22 @@ export type DelegationMode = 'sync' | 'background'
 
 export const MAX_DELEGATION_DEPTH = 3
 
+// Per-session knobs that mirror the Claude Agent SDK's `query({ options })`
+// shape. Forwarded into the underlying harness at spawn time. Each
+// adapter forwards what it can natively express and ignores the rest:
+//   - claude: all three pass straight through to the SDK.
+//   - pi:     systemPrompt / appendSystemPrompt map onto pi's
+//             DefaultResourceLoader; allowedTools maps onto pi's
+//             `tools` allowlist.
+//   - echo:   ignored (echo has no model or tools).
+// Validation policy: pass through if provided, omit cleanly if not —
+// wagent does not synthesize defaults.
+export interface SessionOptions {
+  systemPrompt?: string
+  appendSystemPrompt?: string
+  allowedTools?: string[]
+}
+
 export interface Session {
   id: string
   agent: AgentKind
@@ -19,6 +35,7 @@ export interface Session {
   parentToolCallId: string | null
   delegationDepth: number
   delegationMode: DelegationMode | null
+  options: SessionOptions | null
 }
 
 export interface ContentBlock {

@@ -124,11 +124,12 @@ only ever see wagent's wire types.
 
 ## Session lifecycle
 
-1. Client `POST /v1/sessions { agent, cwd, model? }`.
+1. Client `POST /v1/sessions { agent, cwd, model?, options? }`.
 2. wagent allocates an id, persists a row, returns it.
 3. Client `POST /v1/sessions/:id/message`. Supervisor lazily spawns
    the underlying harness on first prompt and subscribes to its
-   events.
+   events. The persisted `options` are forwarded into the harness at
+   spawn time — see "Per-session options" below.
 4. Harness emits events → normalizer → SQLite append + broadcast →
    SSE consumers see them live.
 5. Client disconnects: harness **stays alive**. SQLite keeps the event
@@ -136,6 +137,39 @@ only ever see wagent's wire types.
 6. `POST /v1/sessions/:id/abort` interrupts the current turn.
 7. `DELETE /v1/sessions/:id` ends and removes the session
    (FK-cascades events; cascade-destroys delegation descendants).
+
+## Per-session options
+
+`POST /v1/sessions` accepts an optional `options` object that mirrors
+the Claude Agent SDK's `query({ options })` shape. It's persisted on
+the session row and forwarded into the underlying harness at spawn
+time:
+
+```ts
+options?: {
+  systemPrompt?: string         // replaces the harness's default prompt
+  appendSystemPrompt?: string   // layered onto the harness's default
+  allowedTools?: string[]       // tool-name allowlist
+}
+```
+
+Validation: each field passes through if provided, is omitted cleanly
+if not — wagent does not synthesize defaults. Unknown fields and
+non-string / non-array shapes are rejected with `400 invalid_options`.
+
+Per-adapter behavior:
+
+| field | claude | pi | echo |
+|---|---|---|---|
+| `systemPrompt` | passes through to `query({ options: { systemPrompt } })` (replaces preset) | applied via a `DefaultResourceLoader` with `systemPrompt` set (replaces pi's preset) | ignored |
+| `appendSystemPrompt` | wrapped as `{ type: 'preset', preset: 'claude_code', append }` | wrapped as `[appendSystemPrompt]` and passed to `DefaultResourceLoader.appendSystemPrompt` | ignored |
+| `allowedTools` | passes straight through to `query({ options: { allowedTools } })` | passes through to `createAgentSession({ tools })` | ignored |
+
+If both `systemPrompt` and `appendSystemPrompt` are set, the
+replacement wins and the append is dropped with a warning log.
+Future option fields not natively supported by an adapter are
+ignored at that adapter only — the wire shape is the same for all
+agents.
 
 ## Auth
 

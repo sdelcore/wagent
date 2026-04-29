@@ -9,6 +9,7 @@ import {
   type AgentKind,
   type ApiError,
   type DelegationMode,
+  type SessionOptions,
 } from '../types.js'
 
 const VALID_AGENTS: AgentKind[] = ['claude', 'pi', 'echo']
@@ -26,6 +27,57 @@ function validateCwd(cwd: unknown): string | null {
   if (trimmed.startsWith('~')) return null
   if (!trimmed.startsWith('/')) return null
   return trimmed
+}
+
+type ValidatedOptions =
+  | { ok: true; value: SessionOptions | null }
+  | { ok: false; code: string; message: string }
+
+// Validate the optional `options` payload from POST /v1/sessions. Each
+// field passes through if provided, is omitted cleanly if not — wagent
+// never synthesizes defaults here.
+function validateSessionOptions(raw: unknown): ValidatedOptions {
+  if (raw === undefined || raw === null) return { ok: true, value: null }
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, code: 'invalid_options', message: 'options must be an object' }
+  }
+  const obj = raw as Record<string, unknown>
+  const out: SessionOptions = {}
+  if (obj.systemPrompt !== undefined) {
+    if (typeof obj.systemPrompt !== 'string') {
+      return { ok: false, code: 'invalid_options', message: 'options.systemPrompt must be a string' }
+    }
+    out.systemPrompt = obj.systemPrompt
+  }
+  if (obj.appendSystemPrompt !== undefined) {
+    if (typeof obj.appendSystemPrompt !== 'string') {
+      return {
+        ok: false,
+        code: 'invalid_options',
+        message: 'options.appendSystemPrompt must be a string',
+      }
+    }
+    out.appendSystemPrompt = obj.appendSystemPrompt
+  }
+  if (obj.allowedTools !== undefined) {
+    if (!Array.isArray(obj.allowedTools) || !obj.allowedTools.every((t) => typeof t === 'string')) {
+      return {
+        ok: false,
+        code: 'invalid_options',
+        message: 'options.allowedTools must be an array of strings',
+      }
+    }
+    out.allowedTools = obj.allowedTools as string[]
+  }
+  // Empty object → null so we don't persist an empty JSON blob.
+  if (
+    out.systemPrompt === undefined &&
+    out.appendSystemPrompt === undefined &&
+    out.allowedTools === undefined
+  ) {
+    return { ok: true, value: null }
+  }
+  return { ok: true, value: out }
 }
 
 export interface SessionsDeps {
@@ -53,6 +105,7 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionsDeps) 
       parentSessionId?: string | null
       parentToolCallId?: string | null
       delegationMode?: string | null
+      options?: unknown
     }
   }>('/v1/sessions', async (req, reply) => {
     const body = req.body ?? {}
@@ -80,6 +133,10 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionsDeps) 
         'invalid_cwd',
         'cwd must be an absolute path (no ~ expansion, no relative paths)',
       )
+    }
+    const optionsResult = validateSessionOptions(body.options)
+    if (!optionsResult.ok) {
+      return bad(reply, 400, optionsResult.code, optionsResult.message)
     }
     // Delegation fields. If parentSessionId is set, validate the parent
     // exists, isn't destroyed, and the resulting depth is within the cap.
@@ -136,6 +193,7 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionsDeps) 
       parentToolCallId,
       delegationDepth,
       delegationMode,
+      options: optionsResult.value,
     })
     reply.code(201)
     return session

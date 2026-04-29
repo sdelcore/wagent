@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   parent_session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
   parent_tool_call_id TEXT,
   delegation_depth INTEGER NOT NULL DEFAULT 0,
-  delegation_mode TEXT
+  delegation_mode TEXT,
+  options_json TEXT
 );
 CREATE INDEX IF NOT EXISTS sessions_by_parent ON sessions (parent_session_id);
 
@@ -66,6 +67,7 @@ export function openDatabase(path: string): DbHandle {
     `ALTER TABLE sessions ADD COLUMN parent_tool_call_id TEXT`,
     `ALTER TABLE sessions ADD COLUMN delegation_depth INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE sessions ADD COLUMN delegation_mode TEXT`,
+    `ALTER TABLE sessions ADD COLUMN options_json TEXT`,
   ]) {
     try {
       raw.exec(stmt)

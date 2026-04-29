@@ -2,8 +2,10 @@ import { randomUUID } from 'node:crypto'
 import {
   createAgentSession,
   AuthStorage,
+  DefaultResourceLoader,
   ModelRegistry,
   SessionManager,
+  getAgentDir,
   type AgentSession,
   type AgentSessionEvent,
 } from '@mariozechner/pi-coding-agent'
@@ -183,11 +185,35 @@ export const piSdkFactory: AgentFactory = {
     const authStorage = AuthStorage.create()
     const modelRegistry = ModelRegistry.create(authStorage)
 
+    // Map per-session SessionOptions onto pi:
+    //   - systemPrompt / appendSystemPrompt go through a custom
+    //     DefaultResourceLoader. systemPrompt replaces pi's preset;
+    //     appendSystemPrompt layers as a single extra string. (Pi's
+    //     loader takes appendSystemPrompt as string[] — we wrap.)
+    //   - allowedTools maps onto pi's `tools` allowlist.
+    // Anything not expressible on pi (none today, but future
+    // option fields) is dropped silently with a debug log.
+    const opts = session.options
+    let resourceLoader: DefaultResourceLoader | undefined
+    if (opts?.systemPrompt !== undefined || opts?.appendSystemPrompt !== undefined) {
+      resourceLoader = new DefaultResourceLoader({
+        cwd: session.cwd,
+        agentDir: getAgentDir(),
+        ...(opts?.systemPrompt !== undefined ? { systemPrompt: opts.systemPrompt } : {}),
+        ...(opts?.appendSystemPrompt !== undefined
+          ? { appendSystemPrompt: [opts.appendSystemPrompt] }
+          : {}),
+      })
+      await resourceLoader.reload()
+    }
+
     const { session: agentSession } = await createAgentSession({
       cwd: session.cwd,
       authStorage,
       modelRegistry,
       sessionManager: SessionManager.inMemory(session.cwd),
+      ...(resourceLoader ? { resourceLoader } : {}),
+      ...(opts?.allowedTools !== undefined ? { tools: opts.allowedTools } : {}),
     })
 
     const proc = new PiSdkAgent(agentSession, deps)
