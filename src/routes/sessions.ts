@@ -4,12 +4,14 @@ import type { EventStore } from '../events/store.js'
 import type { SessionBus } from '../bus.js'
 import type { AgentSupervisor } from '../agent/supervisor.js'
 import { probeAgent } from '../agent/availability.js'
+import { buildForkSeed, VALID_FORK_MODES, type ForkMode } from '../sessions/fork.js'
 import {
   MAX_DELEGATION_DEPTH,
   RESERVED_MCP_SERVER_NAME,
   type AgentKind,
   type ApiError,
   type DelegationMode,
+  type EventEnvelope,
   type McpServerSpec,
   type PermissionMode,
   type SessionOptions,
@@ -18,6 +20,17 @@ import {
 const VALID_AGENTS: AgentKind[] = ['claude', 'pi', 'echo']
 const VALID_DELEGATION_MODES: DelegationMode[] = ['sync', 'background']
 const VALID_PERMISSION_MODES: PermissionMode[] = ['default', 'ask', 'bypass']
+
+// Cap the number of parent events we walk when building a fork seed.
+// Forks are lossy by design; pulling unbounded history hurts both the
+// summary signal and the response time on a long session. 4000 events
+// is enough for the realistic conversational tail without risking the
+// 2000-row default `EventStore.list` limit hiding the older context.
+const MAX_FORK_EVENTS = 4000
+
+// Page size used while walking parent events for a fork. Matches the
+// EventStore.list default; multiple pages get glued together in order.
+const FORK_EVENT_PAGE = 500
 
 function bad(reply: FastifyReply, status: number, code: string, message: string): ApiError {
   reply.code(status)
@@ -397,6 +410,126 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionsDeps) 
       return bad(reply, 404, 'not_found', `session ${req.params.id} not found`)
     }
     return { sessions: store.listDescendants(req.params.id) }
+  })
+
+  // Fork: create a new session of the requested harness, linked to the
+  // parent via parentSessionId, and seed its first user message with a
+  // textual summary (or transcript) of the parent's conversation. The
+  // new session is queryable via the existing descendants endpoint.
+  //
+  // Lossy by design — events do not replay, only context. If a caller
+  // wants a fresh same-tree session with no carry-over context, they
+  // should `POST /v1/sessions { parentSessionId }` instead.
+  app.post<{
+    Params: { id: string }
+    Body: { agent?: string; model?: string | null; mode?: string }
+  }>('/v1/sessions/:id/fork', async (req, reply) => {
+    const body = req.body ?? {}
+    const agent = body.agent
+    if (typeof agent !== 'string' || !VALID_AGENTS.includes(agent as AgentKind)) {
+      return bad(reply, 400, 'invalid_agent', `agent must be one of ${VALID_AGENTS.join(', ')}`)
+    }
+    let mode: ForkMode = 'summary'
+    if (body.mode !== undefined) {
+      if (typeof body.mode !== 'string' || !VALID_FORK_MODES.includes(body.mode as ForkMode)) {
+        return bad(reply, 400, 'invalid_fork_mode', `mode must be one of ${VALID_FORK_MODES.join(', ')}`)
+      }
+      mode = body.mode as ForkMode
+    }
+    if (body.model !== undefined && body.model !== null && typeof body.model !== 'string') {
+      return bad(reply, 400, 'invalid_model', 'model must be a string or null')
+    }
+
+    const parent = store.get(req.params.id)
+    if (!parent) return bad(reply, 404, 'not_found', `session ${req.params.id} not found`)
+    if (parent.destroyedAt !== null) {
+      return bad(reply, 410, 'parent_destroyed', 'parent session is destroyed')
+    }
+
+    // Same depth-cap rule as a delegated child: a fork at depth N+1
+    // counts toward the cap so a runaway failover loop can't outgrow
+    // the tree.
+    const delegationDepth = parent.delegationDepth + 1
+    if (delegationDepth > MAX_DELEGATION_DEPTH) {
+      return bad(
+        reply,
+        400,
+        'depth_cap_exceeded',
+        `delegationDepth ${delegationDepth} exceeds cap ${MAX_DELEGATION_DEPTH}`,
+      )
+    }
+
+    // Refuse forks targeting a harness that isn't installed, same as
+    // POST /v1/sessions, so the caller gets a clean 409 instead of a
+    // spawn-time 500.
+    const availability = await probeAgent(agent as AgentKind)
+    if (!availability.installed) {
+      return bad(
+        reply,
+        409,
+        'agent_not_available',
+        availability.notes ?? `agent ${agent} is not available on this host`,
+      )
+    }
+
+    // Walk the parent's full event log in chronological order. We
+    // bound the walk at MAX_FORK_EVENTS so a runaway parent doesn't
+    // OOM the daemon when forked.
+    const events: EventEnvelope[] = []
+    let after: number | undefined
+    while (events.length < MAX_FORK_EVENTS) {
+      const page = deps.eventStore.list(parent.id, { afterIndex: after, limit: FORK_EVENT_PAGE })
+      if (page.length === 0) break
+      events.push(...page)
+      after = page[page.length - 1]!.eventIndex
+      if (page.length < FORK_EVENT_PAGE) break
+    }
+
+    const seed = buildForkSeed(events, mode, parent.id)
+
+    // Create the child row first so it's queryable via descendants
+    // even if the seed prompt fails downstream.
+    //
+    // delegationMode is left null on purpose: a fork is not a sync /
+    // background delegation, just a parent-link for queryability. The
+    // delegate-MCP path is what cares about that field.
+    const child = store.create({
+      agent: agent as AgentKind,
+      cwd: parent.cwd,
+      alias: null,
+      model: typeof body.model === 'string' ? body.model : null,
+      parentSessionId: parent.id,
+      parentToolCallId: null,
+      delegationDepth,
+      delegationMode: null,
+    })
+
+    // Seed the new session with the leading user message before its
+    // first turn fires, so any client subscribing to the child sees
+    // the same `user_message_chunk` -> `agent_*` -> `stop` flow as a
+    // normal session. Empty seed = parent had no convertible context;
+    // we still return the child row so the caller can prompt it
+    // manually, but skip the auto-prompt.
+    if (seed.length > 0) {
+      try {
+        const proc = await deps.supervisor.ensure(child.id)
+        proc.prompt([{ type: 'text', text: seed }]).catch((err) => {
+          app.log.error({ err, childId: child.id, parentId: parent.id }, 'fork: seed prompt failed')
+        })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'spawn failed'
+        // The child row is real and the parent link is set. Surface
+        // the spawn failure but don't roll back — caller can retry
+        // with POST /v1/sessions/:id/message once they fix whatever
+        // made spawn fail (e.g. CLAUDE auth).
+        app.log.warn({ err, childId: child.id, parentId: parent.id }, 'fork: spawn failed')
+        reply.code(500)
+        return { error: { code: 'spawn_failed', message }, session: child }
+      }
+    }
+
+    reply.code(201)
+    return child
   })
 
   app.patch<{

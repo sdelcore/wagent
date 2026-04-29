@@ -127,6 +127,12 @@ own SSE subscription.
   full subtree. With `descendants_cost`, returns a token-cost rollup
   and `reportingSessionCount` so callers can tell partial coverage
   from zero (claude emits `usage_update`; pi/echo don't yet).
+- `POST /v1/sessions/:id/fork { agent, model?, mode? }` — cross-
+  harness context handoff. Creates a new session of the requested
+  harness, linked via `parentSessionId`, seeded with a textual
+  summary or transcript of the parent's events. Lossy by design —
+  see [architecture.md](./architecture.md#forking). Children created
+  this way show up in `descendants` like any other.
 - `POST /mcp/delegate/:parentSessionId` (and GET) — MCP
   Streamable-HTTP endpoint. Auth: bearer = delegate token.
   Loopback-only.
