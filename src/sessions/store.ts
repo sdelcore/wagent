@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { DbHandle } from '../db.js'
-import type { AgentKind, DelegationMode, Session } from '../types.js'
+import type { AgentKind, DelegationMode, Session, SessionOptions } from '../types.js'
 
 interface SessionRow {
   id: string
@@ -15,6 +15,18 @@ interface SessionRow {
   parent_tool_call_id: string | null
   delegation_depth: number
   delegation_mode: string | null
+  options_json: string | null
+}
+
+function parseOptions(json: string | null): SessionOptions | null {
+  if (!json) return null
+  try {
+    const parsed = JSON.parse(json) as SessionOptions
+    return parsed
+  } catch {
+    // Corrupt row — better to drop the options than fail the read.
+    return null
+  }
 }
 
 function rowToSession(row: SessionRow): Session {
@@ -31,6 +43,7 @@ function rowToSession(row: SessionRow): Session {
     parentToolCallId: row.parent_tool_call_id,
     delegationDepth: row.delegation_depth,
     delegationMode: row.delegation_mode as DelegationMode | null,
+    options: parseOptions(row.options_json),
   }
 }
 
@@ -43,6 +56,7 @@ export interface CreateSessionInput {
   parentToolCallId?: string | null
   delegationDepth?: number
   delegationMode?: DelegationMode | null
+  options?: SessionOptions | null
 }
 
 export class SessionStore {
@@ -51,12 +65,14 @@ export class SessionStore {
   create(input: CreateSessionInput): Session {
     const id = randomUUID()
     const now = Date.now()
+    const optionsJson = input.options ? JSON.stringify(input.options) : null
     this.db.raw
       .prepare(
         `INSERT INTO sessions (
            id, agent, cwd, alias, model, created_at, updated_at,
-           parent_session_id, parent_tool_call_id, delegation_depth, delegation_mode
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           parent_session_id, parent_tool_call_id, delegation_depth, delegation_mode,
+           options_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -70,6 +86,7 @@ export class SessionStore {
         input.parentToolCallId ?? null,
         input.delegationDepth ?? 0,
         input.delegationMode ?? null,
+        optionsJson,
       )
     return {
       id,
@@ -84,6 +101,7 @@ export class SessionStore {
       parentToolCallId: input.parentToolCallId ?? null,
       delegationDepth: input.delegationDepth ?? 0,
       delegationMode: input.delegationMode ?? null,
+      options: input.options ?? null,
     }
   }
 

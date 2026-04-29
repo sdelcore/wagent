@@ -228,12 +228,42 @@ class ClaudeSdkAgent implements AgentProcess {
   ) {}
 
   init(): void {
+    // Translate per-session SessionOptions into the SDK's `options` shape.
+    // - systemPrompt (string) replaces the preset prompt outright.
+    // - appendSystemPrompt layers onto the default `claude_code` preset
+    //   via { type: 'preset', preset: 'claude_code', append }.
+    // - If both are set, replacement wins; appendSystemPrompt is ignored
+    //   because the SDK has no "string + append" shape, only one or the
+    //   other.
+    // - allowedTools passes straight through.
+    const sessionOpts = this.session.options
+    let systemPromptOpt: Options['systemPrompt']
+    if (sessionOpts?.systemPrompt !== undefined) {
+      systemPromptOpt = sessionOpts.systemPrompt
+      if (sessionOpts.appendSystemPrompt !== undefined) {
+        this.deps.log.warn(
+          { sessionId: this.session.id },
+          'claude: options.systemPrompt overrides; options.appendSystemPrompt ignored',
+        )
+      }
+    } else if (sessionOpts?.appendSystemPrompt !== undefined) {
+      systemPromptOpt = {
+        type: 'preset',
+        preset: 'claude_code',
+        append: sessionOpts.appendSystemPrompt,
+      }
+    }
+
     const opts: Options = {
       cwd: this.session.cwd,
       abortController: this.abort,
       includePartialMessages: true,
       canUseTool: this.makeCanUseTool(),
       ...(this.session.model ? { model: this.session.model } : {}),
+      ...(systemPromptOpt !== undefined ? { systemPrompt: systemPromptOpt } : {}),
+      ...(sessionOpts?.allowedTools !== undefined
+        ? { allowedTools: sessionOpts.allowedTools }
+        : {}),
       ...(this.deps.delegate
         ? {
             mcpServers: {
