@@ -189,6 +189,8 @@ options?: {
     | 'default'
     | 'ask'
     | 'bypass'
+  resume?: string               // resume an existing Claude Code transcript
+  forkSession?: boolean         // fork the resumed transcript instead of appending
 }
 
 // McpServerSpec mirrors the Claude Agent SDK's serializable shape:
@@ -215,6 +217,8 @@ Per-adapter behavior:
 | `allowedTools` | passes straight through to `query({ options: { allowedTools } })` | passes through to `createAgentSession({ tools })` | ignored |
 | `mcpServers` | merged into `query({ options: { mcpServers } })` alongside the per-spawn `wagent-delegate` server | ignored with a warn log — pi-coding-agent has no per-session MCP plumbing | ignored |
 | `permissionMode` | `'bypass'` → SDK `permissionMode: 'bypassPermissions'` + `allowDangerouslySkipPermissions: true`, no `canUseTool`. `'default'` / `'ask'` / unset keep wagent's `canUseTool` gate. | ignored (pi has no gate) | ignored |
+| `resume` | passes straight through to `query({ options: { resume } })` — the SDK loads `~/.claude/projects/<encoded cwd>/<uuid>.jsonl` and the wagent session continues from that transcript. The wagent session's `cwd` must match the cwd of the original CLI invocation, otherwise the SDK can't locate the file. | ignored (pi has no transcript-resume primitive) | ignored |
+| `forkSession` | passes through to `query({ options: { forkSession } })` alongside `resume`. When true, the SDK forks the resumed transcript to a new session id rather than appending to the original CLI session's JSONL. The route layer rejects `forkSession: true` without `resume`. | ignored | ignored |
 
 `permissionMode` defaults to `'default'` (wagent-managed gate) when
 omitted — `'default'` and `'ask'` are aliases for that baseline, so
