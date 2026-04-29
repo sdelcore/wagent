@@ -1001,6 +1001,54 @@ test('delegation: depth cap rejects 4th level', async () => {
   await api('DELETE', `/v1/sessions/${root.id}`)
 })
 
+test('delegation: child carries options through to its session row', async () => {
+  // The MCP delegate tool funnels into the same sessionStore.create call
+  // as POST /v1/sessions { parentSessionId, options }, so this test
+  // covers the persistence path that the delegate-options ticket adds.
+  const parent = await json<ChildSession>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+  })
+  const child = await json<ChildSession & { options: Session['options'] }>(
+    'POST',
+    '/v1/sessions',
+    {
+      agent: 'echo',
+      cwd: '/tmp',
+      parentSessionId: parent.id,
+      options: {
+        systemPrompt: 'You are a focused subagent.',
+        allowedTools: ['Read', 'Grep'],
+        permissionMode: 'bypass',
+      },
+    },
+  )
+  assert.equal(child.parentSessionId, parent.id)
+  assert.deepEqual(child.options, {
+    systemPrompt: 'You are a focused subagent.',
+    allowedTools: ['Read', 'Grep'],
+    permissionMode: 'bypass',
+  })
+  await api('DELETE', `/v1/sessions/${parent.id}`)
+})
+
+test('delegation: child rejects bad options the same way a top-level session does', async () => {
+  const parent = await json<ChildSession>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+  })
+  const res = await api('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    parentSessionId: parent.id,
+    options: { permissionMode: 'banana' },
+  })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'invalid_options')
+  await api('DELETE', `/v1/sessions/${parent.id}`)
+})
+
 test('delegation: parent_not_found / parent_destroyed', async () => {
   const noSuch = await api('POST', '/v1/sessions', {
     agent: 'echo',
