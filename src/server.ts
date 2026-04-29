@@ -185,6 +185,7 @@ async function runDeepProbe(log: FastifyBaseLogger): Promise<DeepProbeResult> {
     parentToolCallId: null,
     delegationDepth: 0,
     delegationMode: null,
+    options: null,
   }
 
   let stopResolve: (() => void) | null = null

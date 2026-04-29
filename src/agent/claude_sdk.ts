@@ -236,6 +236,10 @@ class ClaudeSdkAgent implements AgentProcess {
     //   because the SDK has no "string + append" shape, only one or the
     //   other.
     // - allowedTools passes straight through.
+    // - permissionMode 'bypass' hands the SDK `bypassPermissions` mode
+    //   and omits `canUseTool`, so tool calls never round-trip through
+    //   wagent's permission API. 'default' / 'ask' / unset keep the
+    //   gate in place (wagent's baseline contract).
     const sessionOpts = this.session.options
     let systemPromptOpt: Options['systemPrompt']
     if (sessionOpts?.systemPrompt !== undefined) {
@@ -273,11 +277,22 @@ class ClaudeSdkAgent implements AgentProcess {
       }
     }
 
+    const bypassPermissions = sessionOpts?.permissionMode === 'bypass'
+
     const opts: Options = {
       cwd: this.session.cwd,
       abortController: this.abort,
       includePartialMessages: true,
-      canUseTool: this.makeCanUseTool(),
+      // bypass: hand the SDK `bypassPermissions` mode (the safety
+      // flag `allowDangerouslySkipPermissions` is required alongside)
+      // and skip wagent's own gate. Otherwise install canUseTool so
+      // tool calls surface as `permission_request` events.
+      ...(bypassPermissions
+        ? {
+            permissionMode: 'bypassPermissions' as const,
+            allowDangerouslySkipPermissions: true,
+          }
+        : { canUseTool: this.makeCanUseTool() }),
       ...(this.session.model ? { model: this.session.model } : {}),
       ...(systemPromptOpt !== undefined ? { systemPrompt: systemPromptOpt } : {}),
       ...(sessionOpts?.allowedTools !== undefined

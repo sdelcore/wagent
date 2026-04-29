@@ -98,6 +98,7 @@ interface Session {
       | { type: 'http'; url: string; headers?: Record<string, string> }
       | { type: 'sse'; url: string; headers?: Record<string, string> }
     >
+    permissionMode?: 'default' | 'ask' | 'bypass'
   } | null
 }
 
@@ -373,6 +374,31 @@ test('POST /v1/sessions rejects non-object mcpServers → 400 invalid_options', 
   assert.equal(body.error.code, 'invalid_options')
 })
 
+test('POST /v1/sessions persists permissionMode when provided', async () => {
+  for (const mode of ['default', 'ask', 'bypass'] as const) {
+    const created = await json<Session>('POST', '/v1/sessions', {
+      agent: 'echo',
+      cwd: '/tmp',
+      options: { permissionMode: mode },
+    })
+    assert.equal(created.options?.permissionMode, mode)
+    const got = await json<Session>('GET', `/v1/sessions/${created.id}`)
+    assert.equal(got.options?.permissionMode, mode)
+    await api('DELETE', `/v1/sessions/${created.id}`)
+  }
+})
+
+test('POST /v1/sessions rejects unknown permissionMode → 400 invalid_options', async () => {
+  const res = await api('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: { permissionMode: 'yolo' },
+  })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'invalid_options')
+})
+
 test('POST /v1/sessions rejects unknown mcpServers transport type → 400 invalid_options', async () => {
   const res = await api('POST', '/v1/sessions', {
     agent: 'echo',
@@ -424,6 +450,17 @@ test('POST /v1/sessions rejects reserved mcpServers key wagent-delegate → 400 
     options: {
       mcpServers: { 'wagent-delegate': { type: 'http', url: 'https://shadow/mcp' } },
     },
+  })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'invalid_options')
+})
+
+test('POST /v1/sessions rejects non-string permissionMode → 400 invalid_options', async () => {
+  const res = await api('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: { permissionMode: 42 },
   })
   assert.equal(res.status, 400)
   const body = (await res.json()) as { error: { code: string } }

@@ -111,13 +111,22 @@ Permission outcomes: `allow_always` / `allow_once` / `reject`.
 Internal (wagent ↔ harness):
 
 - **Claude** — `@anthropic-ai/claude-agent-sdk`'s `query({ prompt, options })`,
-  in-process. The SDK manages the `claude` CLI child. Permissions
-  flow through `canUseTool`. MCP servers are passed in `options.mcpServers`:
-  the per-spawn `wagent-delegate` server plus any caller-supplied
-  servers from `POST /v1/sessions { options: { mcpServers } }`.
+  in-process. The SDK manages the `claude` CLI child. By default every
+  tool call routes through wagent's `canUseTool` callback and surfaces
+  as a `permission_request` event that the caller must resolve — i.e.
+  the SDK's `--permission-mode bypassPermissions` short-circuit is
+  *not* enabled by default, so wagent owns the permission round-trip.
+  Callers that enforce policy upstream can opt out per session via
+  `options.permissionMode: 'bypass'` (see "Per-session options" below),
+  which hands the SDK `bypassPermissions` and skips the gate. MCP
+  servers are passed in `options.mcpServers`: the per-spawn
+  `wagent-delegate` server plus any caller-supplied servers from
+  `POST /v1/sessions { options: { mcpServers } }`.
 - **Pi** — `@mariozechner/pi-coding-agent`'s `createAgentSession()`,
   fully in-process. Events arrive via `session.subscribe(...)` and
-  prompts through `session.prompt(...)`.
+  prompts through `session.prompt(...)`. Pi runs without a permission
+  gate, so it never emits `permission_request` events regardless of
+  `options.permissionMode`.
 
 Both adapters translate vendor events into the same `SessionUpdate`
 shape (see `translateClaudeMessage` / `translatePiEvent`), so routes
@@ -152,6 +161,10 @@ options?: {
   appendSystemPrompt?: string   // layered onto the harness's default
   allowedTools?: string[]       // tool-name allowlist
   mcpServers?: Record<string, McpServerSpec>  // per-session MCP servers
+  permissionMode?:              // gate every tool call, or bypass entirely
+    | 'default'
+    | 'ask'
+    | 'bypass'
 }
 
 // McpServerSpec mirrors the Claude Agent SDK's serializable shape:
@@ -162,11 +175,12 @@ type McpServerSpec =
 ```
 
 Validation: each field passes through if provided, is omitted cleanly
-if not — wagent does not synthesize defaults. Unknown fields and
-non-string / non-array shapes are rejected with `400 invalid_options`.
-The reserved server name `wagent-delegate` cannot be used as a key in
-`mcpServers` — it's owned by wagent's per-spawn delegation channel and
-collisions return `400 invalid_options`.
+if not — wagent does not synthesize defaults. Unknown fields,
+non-string / non-array shapes, or an unknown `permissionMode` value
+are rejected with `400 invalid_options`. The reserved server name
+`wagent-delegate` cannot be used as a key in `mcpServers` — it's
+owned by wagent's per-spawn delegation channel and collisions return
+`400 invalid_options`.
 
 Per-adapter behavior:
 
@@ -176,6 +190,16 @@ Per-adapter behavior:
 | `appendSystemPrompt` | wrapped as `{ type: 'preset', preset: 'claude_code', append }` | wrapped as `[appendSystemPrompt]` and passed to `DefaultResourceLoader.appendSystemPrompt` | ignored |
 | `allowedTools` | passes straight through to `query({ options: { allowedTools } })` | passes through to `createAgentSession({ tools })` | ignored |
 | `mcpServers` | merged into `query({ options: { mcpServers } })` alongside the per-spawn `wagent-delegate` server | ignored with a warn log — pi-coding-agent has no per-session MCP plumbing | ignored |
+| `permissionMode` | `'bypass'` → SDK `permissionMode: 'bypassPermissions'` + `allowDangerouslySkipPermissions: true`, no `canUseTool`. `'default'` / `'ask'` / unset keep wagent's `canUseTool` gate. | ignored (pi has no gate) | ignored |
+
+`permissionMode` defaults to `'default'` (wagent-managed gate) when
+omitted — `'default'` and `'ask'` are aliases for that baseline, so
+every tool call surfaces as a `permission_request` event that callers
+resolve via `POST /v1/sessions/:id/permissions/:requestId`. Set
+`'bypass'` only when an upstream caller (e.g. ARIA) is enforcing
+tool-use policy itself; tool calls then run without a wagent
+round-trip and no `permission_request` events are emitted for that
+session.
 
 If both `systemPrompt` and `appendSystemPrompt` are set, the
 replacement wins and the append is dropped with a warning log.
