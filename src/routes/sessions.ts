@@ -9,11 +9,13 @@ import {
   type AgentKind,
   type ApiError,
   type DelegationMode,
+  type PermissionMode,
   type SessionOptions,
 } from '../types.js'
 
 const VALID_AGENTS: AgentKind[] = ['claude', 'pi', 'echo']
 const VALID_DELEGATION_MODES: DelegationMode[] = ['sync', 'background']
+const VALID_PERMISSION_MODES: PermissionMode[] = ['default', 'ask', 'bypass']
 
 function bad(reply: FastifyReply, status: number, code: string, message: string): ApiError {
   reply.code(status)
@@ -69,11 +71,25 @@ function validateSessionOptions(raw: unknown): ValidatedOptions {
     }
     out.allowedTools = obj.allowedTools as string[]
   }
+  if (obj.permissionMode !== undefined) {
+    if (
+      typeof obj.permissionMode !== 'string' ||
+      !VALID_PERMISSION_MODES.includes(obj.permissionMode as PermissionMode)
+    ) {
+      return {
+        ok: false,
+        code: 'invalid_options',
+        message: `options.permissionMode must be one of ${VALID_PERMISSION_MODES.join(', ')}`,
+      }
+    }
+    out.permissionMode = obj.permissionMode as PermissionMode
+  }
   // Empty object → null so we don't persist an empty JSON blob.
   if (
     out.systemPrompt === undefined &&
     out.appendSystemPrompt === undefined &&
-    out.allowedTools === undefined
+    out.allowedTools === undefined &&
+    out.permissionMode === undefined
   ) {
     return { ok: true, value: null }
   }

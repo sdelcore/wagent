@@ -97,12 +97,21 @@ Permission outcomes: `allow_always` / `allow_once` / `reject`.
 Internal (wagent ↔ harness):
 
 - **Claude** — `@anthropic-ai/claude-agent-sdk`'s `query({ prompt, options })`,
-  in-process. The SDK manages the `claude` CLI child. Permissions
-  flow through `canUseTool`. MCP servers are passed in `options.mcpServers`
-  (used for the delegation endpoint).
+  in-process. The SDK manages the `claude` CLI child. By default every
+  tool call routes through wagent's `canUseTool` callback and surfaces
+  as a `permission_request` event that the caller must resolve — i.e.
+  the SDK's `--permission-mode bypassPermissions` short-circuit is
+  *not* enabled by default, so wagent owns the permission round-trip.
+  Callers that enforce policy upstream can opt out per session via
+  `options.permissionMode: 'bypass'` (see "Per-session options" below),
+  which hands the SDK `bypassPermissions` and skips the gate. MCP
+  servers are passed in `options.mcpServers` (used for the delegation
+  endpoint).
 - **Pi** — `@mariozechner/pi-coding-agent`'s `createAgentSession()`,
   fully in-process. Events arrive via `session.subscribe(...)` and
-  prompts through `session.prompt(...)`.
+  prompts through `session.prompt(...)`. Pi runs without a permission
+  gate, so it never emits `permission_request` events regardless of
+  `options.permissionMode`.
 
 Both adapters translate vendor events into the same `SessionUpdate`
 shape (see `translateClaudeMessage` / `translatePiEvent`), so routes
@@ -136,12 +145,17 @@ options?: {
   systemPrompt?: string         // replaces the harness's default prompt
   appendSystemPrompt?: string   // layered onto the harness's default
   allowedTools?: string[]       // tool-name allowlist
+  permissionMode?:              // gate every tool call, or bypass entirely
+    | 'default'
+    | 'ask'
+    | 'bypass'
 }
 ```
 
 Validation: each field passes through if provided, is omitted cleanly
 if not — wagent does not synthesize defaults. Unknown fields and
-non-string / non-array shapes are rejected with `400 invalid_options`.
+non-string / non-array shapes (or an unknown `permissionMode` value)
+are rejected with `400 invalid_options`.
 
 Per-adapter behavior:
 
@@ -150,6 +164,16 @@ Per-adapter behavior:
 | `systemPrompt` | passes through to `query({ options: { systemPrompt } })` (replaces preset) | applied via a `DefaultResourceLoader` with `systemPrompt` set (replaces pi's preset) | ignored |
 | `appendSystemPrompt` | wrapped as `{ type: 'preset', preset: 'claude_code', append }` | wrapped as `[appendSystemPrompt]` and passed to `DefaultResourceLoader.appendSystemPrompt` | ignored |
 | `allowedTools` | passes straight through to `query({ options: { allowedTools } })` | passes through to `createAgentSession({ tools })` | ignored |
+| `permissionMode` | `'bypass'` → SDK `permissionMode: 'bypassPermissions'` + `allowDangerouslySkipPermissions: true`, no `canUseTool`. `'default'` / `'ask'` / unset keep wagent's `canUseTool` gate. | ignored (pi has no gate) | ignored |
+
+`permissionMode` defaults to `'default'` (wagent-managed gate) when
+omitted — `'default'` and `'ask'` are aliases for that baseline, so
+every tool call surfaces as a `permission_request` event that callers
+resolve via `POST /v1/sessions/:id/permissions/:requestId`. Set
+`'bypass'` only when an upstream caller (e.g. ARIA) is enforcing
+tool-use policy itself; tool calls then run without a wagent
+round-trip and no `permission_request` events are emitted for that
+session.
 
 If both `systemPrompt` and `appendSystemPrompt` are set, the
 replacement wins and the append is dropped with a warning log.

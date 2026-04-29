@@ -92,6 +92,7 @@ interface Session {
     systemPrompt?: string
     appendSystemPrompt?: string
     allowedTools?: string[]
+    permissionMode?: 'default' | 'ask' | 'bypass'
   } | null
 }
 
@@ -300,6 +301,42 @@ test('POST /v1/sessions rejects non-string-array allowedTools → 400 invalid_op
     agent: 'echo',
     cwd: '/tmp',
     options: { allowedTools: ['ok', 7] },
+  })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'invalid_options')
+})
+
+test('POST /v1/sessions persists permissionMode when provided', async () => {
+  for (const mode of ['default', 'ask', 'bypass'] as const) {
+    const created = await json<Session>('POST', '/v1/sessions', {
+      agent: 'echo',
+      cwd: '/tmp',
+      options: { permissionMode: mode },
+    })
+    assert.equal(created.options?.permissionMode, mode)
+    const got = await json<Session>('GET', `/v1/sessions/${created.id}`)
+    assert.equal(got.options?.permissionMode, mode)
+    await api('DELETE', `/v1/sessions/${created.id}`)
+  }
+})
+
+test('POST /v1/sessions rejects unknown permissionMode → 400 invalid_options', async () => {
+  const res = await api('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: { permissionMode: 'yolo' },
+  })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'invalid_options')
+})
+
+test('POST /v1/sessions rejects non-string permissionMode → 400 invalid_options', async () => {
+  const res = await api('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    options: { permissionMode: 42 },
   })
   assert.equal(res.status, 400)
   const body = (await res.json()) as { error: { code: string } }

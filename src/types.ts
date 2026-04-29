@@ -9,17 +9,34 @@ export const MAX_DELEGATION_DEPTH = 3
 // Per-session knobs that mirror the Claude Agent SDK's `query({ options })`
 // shape. Forwarded into the underlying harness at spawn time. Each
 // adapter forwards what it can natively express and ignores the rest:
-//   - claude: all three pass straight through to the SDK.
+//   - claude: systemPrompt / appendSystemPrompt / allowedTools pass
+//             straight through; permissionMode controls whether tool
+//             calls round-trip through wagent's permission API.
 //   - pi:     systemPrompt / appendSystemPrompt map onto pi's
 //             DefaultResourceLoader; allowedTools maps onto pi's
-//             `tools` allowlist.
+//             `tools` allowlist; permissionMode is ignored (pi runs
+//             without a permission gate today).
 //   - echo:   ignored (echo has no model or tools).
 // Validation policy: pass through if provided, omit cleanly if not —
 // wagent does not synthesize defaults.
+//
+// permissionMode semantics (claude only):
+//   - 'default' / 'ask' / unset: every tool call surfaces as a
+//     `permission_request` event that the caller must resolve via
+//     POST /v1/sessions/:id/permissions/:requestId. This is wagent's
+//     baseline contract.
+//   - 'bypass': sets the underlying SDK to `bypassPermissions` and
+//     skips wagent's `canUseTool` round-trip entirely. Intended for
+//     callers (e.g. ARIA) that enforce tool-use policy upstream and
+//     don't want each tool gated through wagent. Equivalent to
+//     `claude --permission-mode bypassPermissions`.
+export type PermissionMode = 'default' | 'ask' | 'bypass'
+
 export interface SessionOptions {
   systemPrompt?: string
   appendSystemPrompt?: string
   allowedTools?: string[]
+  permissionMode?: PermissionMode
 }
 
 export interface Session {
