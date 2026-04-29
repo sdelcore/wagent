@@ -89,10 +89,33 @@ data: {"kind":"agent_message_chunk","sessionId":"...","eventIndex":42,
 `kind` is one of: `agent_message_chunk`, `agent_thought_chunk`,
 `tool_call`, `tool_call_update`, `plan`, `user_message_chunk`,
 `permission_request`, `permission_resolved`, `stop`,
-`subprocess_died`, `session_destroyed`, `usage_update`. Stable v1
-contract — see `src/types.ts`.
+`subprocess_died`, `session_destroyed`, `usage_update`, `error`.
+Stable v1 contract — see `src/types.ts`.
 
 Permission outcomes: `allow_always` / `allow_once` / `reject`.
+
+`error` events carry a typed classification so callers can branch
+without string-matching adapter stderr. Payload:
+
+```ts
+{
+  kind: 'error',
+  category: 'rate_limit' | 'auth' | 'quota' | 'upstream_5xx' | 'transport' | 'internal',
+  retryable: boolean,
+  retryAfterMs?: number,
+  message: string,
+}
+```
+
+`error` is informational — it sits next to the terminal event
+(`stop` / `subprocess_died`), it does not replace it. Adapters
+classify what they can confidently recognise and default to
+`internal`. The claude adapter maps the SDK's typed
+`SDKAssistantMessageError` enum (`rate_limit`, `authentication_failed`,
+`billing_error`, `server_error`, …) and reads `retry-after` headers
+from any thrown HTTP error. The pi adapter classifies on
+best-effort string match against `errorMessage`; everything else
+is `internal`. echo never emits `error`.
 
 Internal (wagent ↔ harness):
 

@@ -6,12 +6,14 @@ import {
   type Options,
   type PermissionResult,
   type Query,
+  type SDKAssistantMessageError,
   type SDKMessage,
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk'
 import type { AgentFactory, AgentProcess, AgentSpawnDeps } from './process.js'
 import type {
   ContentBlock as WireContent,
+  ErrorPayload,
   PermissionOutcome,
   Session,
   SessionUpdate,
@@ -69,9 +71,13 @@ export function translateClaudeMessage(
     case 'assistant': {
       // Final assistant message — surface any tool_use blocks as tool_call
       // events. Text/thinking already streamed via stream_event partials.
-      const content = msg.message.content
-      if (!Array.isArray(content)) return []
+      // If the SDK attached an `error` tag (rate_limit, auth, etc.) emit
+      // a typed `error` event so callers can branch on the category.
       const out: SessionUpdate[] = []
+      const errorTag = (msg as { error?: SDKAssistantMessageError }).error
+      if (errorTag) out.push(errorPayloadToUpdate(classifyAssistantError(errorTag)))
+      const content = msg.message.content
+      if (!Array.isArray(content)) return out
       for (const block of content) {
         if (block && typeof block === 'object' && (block as { type?: string }).type === 'tool_use') {
           const tu = block as { id: string; name: string; input?: unknown }
@@ -139,6 +145,141 @@ export function translateStopReason(
     }
   }
   return 'error'
+}
+
+// Map the Claude Agent SDK's typed in-stream error tag (attached to
+// SDKAssistantMessage / SDKAPIRetryMessage) to a wagent ErrorPayload.
+// These are the cleanest classification signal — the upstream HTTP
+// request already failed with a typed status and the SDK normalised
+// it for us.
+export function classifyAssistantError(tag: SDKAssistantMessageError): ErrorPayload {
+  switch (tag) {
+    case 'rate_limit':
+      return { category: 'rate_limit', retryable: true, message: 'rate limit exceeded' }
+    case 'authentication_failed':
+      return { category: 'auth', retryable: false, message: 'authentication failed' }
+    case 'billing_error':
+      return { category: 'quota', retryable: false, message: 'billing / quota exhausted' }
+    case 'server_error':
+      return { category: 'upstream_5xx', retryable: true, message: 'upstream 5xx' }
+    case 'invalid_request':
+      return { category: 'internal', retryable: false, message: 'invalid request' }
+    case 'max_output_tokens':
+      return { category: 'internal', retryable: false, message: 'max output tokens reached' }
+    case 'unknown':
+    default:
+      return { category: 'internal', retryable: false, message: 'unknown upstream error' }
+  }
+}
+
+// Best-effort classification of an exception thrown by the SDK pump
+// (network errors, abort, anything not surfaced as an in-stream tag).
+// Duck-typed against the @anthropic-ai/sdk error shapes so we don't take
+// a direct dep on that transitive package.
+export function classifyThrownError(err: unknown): ErrorPayload {
+  if (err === null || err === undefined) {
+    return { category: 'internal', retryable: false, message: 'unknown error' }
+  }
+  const e = err as {
+    name?: string
+    message?: string
+    status?: number
+    headers?: { get?(name: string): string | null } | Record<string, string | undefined>
+    cause?: { code?: string; name?: string }
+    code?: string
+  }
+  const message = e.message ?? String(err)
+
+  // Aborts: surfaced as transport when not a clean cancel (which the
+  // adapter handles separately via `aborted=true`).
+  if (e.name === 'AbortError' || e.name === 'APIUserAbortError') {
+    return { category: 'transport', retryable: false, message }
+  }
+
+  // Connection / DNS / TLS / fetch network failures.
+  const causeCode = e.cause?.code
+  if (
+    e.name === 'APIConnectionError' ||
+    e.name === 'APIConnectionTimeoutError' ||
+    e.code === 'ECONNRESET' ||
+    e.code === 'ETIMEDOUT' ||
+    e.code === 'ENOTFOUND' ||
+    causeCode === 'ECONNRESET' ||
+    causeCode === 'ETIMEDOUT' ||
+    causeCode === 'ENOTFOUND'
+  ) {
+    return { category: 'transport', retryable: true, message }
+  }
+
+  const status = typeof e.status === 'number' ? e.status : undefined
+  if (status !== undefined) {
+    const retryAfterMs = readRetryAfterMs(e.headers)
+    if (status === 429) {
+      return {
+        category: 'rate_limit',
+        retryable: true,
+        message,
+        ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+      }
+    }
+    if (status === 401 || status === 403) {
+      return { category: 'auth', retryable: false, message }
+    }
+    if (status === 402) {
+      return { category: 'quota', retryable: false, message }
+    }
+    if (status >= 500 && status < 600) {
+      return {
+        category: 'upstream_5xx',
+        retryable: true,
+        message,
+        ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+      }
+    }
+    if (status >= 400 && status < 500) {
+      return { category: 'internal', retryable: false, message }
+    }
+  }
+
+  return { category: 'internal', retryable: false, message }
+}
+
+function readRetryAfterMs(
+  headers: { get?(name: string): string | null } | Record<string, string | undefined> | undefined,
+): number | undefined {
+  if (!headers) return undefined
+  let raw: string | null | undefined
+  const maybeFetchHeaders = headers as { get?(name: string): string | null }
+  if (typeof maybeFetchHeaders.get === 'function') {
+    raw = maybeFetchHeaders.get('retry-after')
+  } else {
+    const plain = headers as Record<string, string | undefined>
+    raw = plain['retry-after'] ?? plain['Retry-After']
+  }
+  if (!raw) return undefined
+  // RFC 7231: either an integer seconds value or an HTTP-date.
+  const seconds = Number(raw)
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000)
+  const date = Date.parse(raw)
+  if (!Number.isNaN(date)) {
+    const delta = date - Date.now()
+    return delta > 0 ? delta : 0
+  }
+  return undefined
+}
+
+// Build the wire-shaped SessionUpdate for a classified error. Kept
+// separate from classify* so adapters can compose / synthesise their
+// own payloads (see the pump's catch block).
+export function errorPayloadToUpdate(payload: ErrorPayload): SessionUpdate {
+  const out: SessionUpdate = {
+    kind: 'error',
+    category: payload.category,
+    retryable: payload.retryable,
+    message: payload.message,
+  }
+  if (payload.retryAfterMs !== undefined) out.retryAfterMs = payload.retryAfterMs
+  return out
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +398,12 @@ class ClaudeSdkAgent implements AgentProcess {
         p.resolve({ behavior: 'deny', message: 'agent terminated' })
       }
       this.pending.clear()
+      // Surface a typed `error` event before the terminal `subprocess_died`
+      // so callers can branch (e.g. ARIA failover on rate_limit). Skip if
+      // the pump exited because of a clean cancel — that's not an error.
+      if (!this.aborted && !this.closed) {
+        this.deps.emit(errorPayloadToUpdate(classifyThrownError(err)))
+      }
       // Resolve any in-flight turn as error.
       const turn = this.currentTurn
       if (turn) {

@@ -6,6 +6,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  classifyAssistantError,
+  classifyThrownError,
+  errorPayloadToUpdate,
   translateClaudeMessage,
   translateStopReason,
   type ClaudeTranslationState,
@@ -297,4 +300,190 @@ test('system messages (compact_boundary, status, etc.) emit nothing', () => {
     state(),
   )
   assert.deepEqual(out, [])
+})
+
+// ---------------------------------------------------------------------------
+// Typed error classification
+// ---------------------------------------------------------------------------
+
+test('classifyAssistantError: rate_limit → category rate_limit, retryable', () => {
+  const p = classifyAssistantError('rate_limit')
+  assert.equal(p.category, 'rate_limit')
+  assert.equal(p.retryable, true)
+})
+
+test('classifyAssistantError: authentication_failed → auth, not retryable', () => {
+  const p = classifyAssistantError('authentication_failed')
+  assert.equal(p.category, 'auth')
+  assert.equal(p.retryable, false)
+})
+
+test('classifyAssistantError: billing_error → quota, not retryable', () => {
+  const p = classifyAssistantError('billing_error')
+  assert.equal(p.category, 'quota')
+  assert.equal(p.retryable, false)
+})
+
+test('classifyAssistantError: server_error → upstream_5xx, retryable', () => {
+  const p = classifyAssistantError('server_error')
+  assert.equal(p.category, 'upstream_5xx')
+  assert.equal(p.retryable, true)
+})
+
+test('classifyAssistantError: invalid_request → internal, not retryable', () => {
+  const p = classifyAssistantError('invalid_request')
+  assert.equal(p.category, 'internal')
+  assert.equal(p.retryable, false)
+})
+
+test('classifyAssistantError: unknown → internal', () => {
+  const p = classifyAssistantError('unknown')
+  assert.equal(p.category, 'internal')
+})
+
+test('classifyThrownError: 429 with numeric retry-after → rate_limit + retryAfterMs', () => {
+  const err = {
+    name: 'RateLimitError',
+    status: 429,
+    message: 'Too many requests',
+    headers: new Headers({ 'retry-after': '30' }),
+  }
+  const p = classifyThrownError(err)
+  assert.equal(p.category, 'rate_limit')
+  assert.equal(p.retryable, true)
+  assert.equal(p.retryAfterMs, 30000)
+})
+
+test('classifyThrownError: 429 with HTTP-date retry-after → rate_limit + retryAfterMs', () => {
+  const future = new Date(Date.now() + 5000).toUTCString()
+  const err = {
+    name: 'RateLimitError',
+    status: 429,
+    message: 'Too many requests',
+    headers: { 'retry-after': future },
+  }
+  const p = classifyThrownError(err)
+  assert.equal(p.category, 'rate_limit')
+  assert.ok(p.retryAfterMs && p.retryAfterMs > 0 && p.retryAfterMs <= 5000)
+})
+
+test('classifyThrownError: 401 → auth, not retryable', () => {
+  const p = classifyThrownError({
+    name: 'AuthenticationError',
+    status: 401,
+    message: 'invalid api key',
+  })
+  assert.equal(p.category, 'auth')
+  assert.equal(p.retryable, false)
+})
+
+test('classifyThrownError: 403 → auth', () => {
+  const p = classifyThrownError({ status: 403, message: 'forbidden' })
+  assert.equal(p.category, 'auth')
+})
+
+test('classifyThrownError: 402 → quota', () => {
+  const p = classifyThrownError({ status: 402, message: 'payment required' })
+  assert.equal(p.category, 'quota')
+  assert.equal(p.retryable, false)
+})
+
+test('classifyThrownError: 503 → upstream_5xx, retryable', () => {
+  const p = classifyThrownError({ status: 503, message: 'overloaded' })
+  assert.equal(p.category, 'upstream_5xx')
+  assert.equal(p.retryable, true)
+})
+
+test('classifyThrownError: APIConnectionError → transport, retryable', () => {
+  const p = classifyThrownError({
+    name: 'APIConnectionError',
+    message: 'fetch failed',
+  })
+  assert.equal(p.category, 'transport')
+  assert.equal(p.retryable, true)
+})
+
+test('classifyThrownError: ECONNRESET in cause.code → transport', () => {
+  const p = classifyThrownError({
+    message: 'fetch failed',
+    cause: { code: 'ECONNRESET' },
+  })
+  assert.equal(p.category, 'transport')
+})
+
+test('classifyThrownError: 4xx that is not 401/402/403/429 → internal', () => {
+  const p = classifyThrownError({ status: 422, message: 'unprocessable' })
+  assert.equal(p.category, 'internal')
+  assert.equal(p.retryable, false)
+})
+
+test('classifyThrownError: AbortError → transport, not retryable', () => {
+  const p = classifyThrownError({ name: 'AbortError', message: 'aborted' })
+  assert.equal(p.category, 'transport')
+  assert.equal(p.retryable, false)
+})
+
+test('classifyThrownError: unknown → internal', () => {
+  const p = classifyThrownError(new Error('boom'))
+  assert.equal(p.category, 'internal')
+  assert.equal(p.message, 'boom')
+})
+
+test('classifyThrownError: null/undefined fall back to internal without crashing', () => {
+  assert.equal(classifyThrownError(null).category, 'internal')
+  assert.equal(classifyThrownError(undefined).category, 'internal')
+})
+
+test('errorPayloadToUpdate omits retryAfterMs when not set', () => {
+  const u = errorPayloadToUpdate({ category: 'auth', retryable: false, message: 'x' })
+  assert.equal(u.kind, 'error')
+  assert.equal(u.category, 'auth')
+  assert.equal(u.retryable, false)
+  assert.equal(u.message, 'x')
+  assert.equal('retryAfterMs' in u, false)
+})
+
+test('errorPayloadToUpdate includes retryAfterMs when set', () => {
+  const u = errorPayloadToUpdate({
+    category: 'rate_limit',
+    retryable: true,
+    message: 'slow down',
+    retryAfterMs: 12345,
+  })
+  assert.equal(u.retryAfterMs, 12345)
+})
+
+test('translateClaudeMessage: assistant with error tag emits typed error event before tool_calls', () => {
+  const out = translateClaudeMessage(
+    {
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'tc-1', name: 'Read', input: {} }],
+      },
+      parent_tool_use_id: null,
+      error: 'rate_limit',
+    } as unknown as SDKMessage,
+    state(),
+  )
+  assert.equal(out.length, 2)
+  assert.equal((out[0] as { kind: string }).kind, 'error')
+  assert.equal((out[0] as { category: string }).category, 'rate_limit')
+  assert.equal((out[1] as { kind: string }).kind, 'tool_call')
+})
+
+test('translateClaudeMessage: assistant without error tag does not emit error event', () => {
+  const out = translateClaudeMessage(
+    {
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'tc-1', name: 'Read', input: {} }],
+      },
+      parent_tool_use_id: null,
+    } as unknown as SDKMessage,
+    state(),
+  )
+  assert.equal(out.length, 1)
+  assert.equal((out[0] as { kind: string }).kind, 'tool_call')
 })
