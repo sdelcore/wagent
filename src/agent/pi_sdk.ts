@@ -18,6 +18,7 @@ import type {
   Session,
   SessionUpdate,
 } from '../types.js'
+import { makeError } from './errors.js'
 
 // Event-translation context. messageId is regenerated on every
 // message_start so streaming chunks within a single assistant
@@ -35,7 +36,7 @@ export function classifyPiErrorMessage(raw: string | undefined): ErrorPayload {
   const message = raw?.trim() || 'pi reported an error'
   const lower = message.toLowerCase()
   if (lower.includes('rate limit') || lower.includes('rate-limit') || lower.includes('429')) {
-    return { category: 'rate_limit', retryable: true, message }
+    return makeError('rate_limit', message)
   }
   if (
     lower.includes('quota') ||
@@ -43,7 +44,7 @@ export function classifyPiErrorMessage(raw: string | undefined): ErrorPayload {
     lower.includes('payment required') ||
     lower.includes('credit')
   ) {
-    return { category: 'quota', retryable: false, message }
+    return makeError('quota', message)
   }
   if (
     lower.includes('unauthorized') ||
@@ -53,7 +54,7 @@ export function classifyPiErrorMessage(raw: string | undefined): ErrorPayload {
     lower.includes('invalid api key') ||
     lower.includes('authentication')
   ) {
-    return { category: 'auth', retryable: false, message }
+    return makeError('auth', message)
   }
   if (
     lower.includes('overloaded') ||
@@ -64,7 +65,7 @@ export function classifyPiErrorMessage(raw: string | undefined): ErrorPayload {
     lower.includes('upstream') ||
     lower.includes('server error')
   ) {
-    return { category: 'upstream_5xx', retryable: true, message }
+    return makeError('upstream_5xx', message)
   }
   if (
     lower.includes('econnreset') ||
@@ -74,9 +75,9 @@ export function classifyPiErrorMessage(raw: string | undefined): ErrorPayload {
     lower.includes('socket hang up') ||
     lower.includes('fetch failed')
   ) {
-    return { category: 'transport', retryable: true, message }
+    return makeError('transport', message)
   }
-  return { category: 'internal', retryable: false, message }
+  return makeError('internal', message)
 }
 
 // Build the wire-shaped SessionUpdate for a classified error.
