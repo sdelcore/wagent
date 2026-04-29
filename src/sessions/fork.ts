@@ -67,15 +67,34 @@ function buildTranscript(events: EventEnvelope[], parentSessionId: string): stri
   let currentId: unknown = null
   let currentText = ''
   for (const ev of events) {
-    if (ev.kind !== 'agent_message_chunk') continue
-    const chunk = ev.payload as AssistantChunk
-    if (typeof chunk.text !== 'string' || chunk.text.length === 0) continue
-    if (chunk.messageId !== currentId) {
-      if (currentText.length > 0) messages.push(currentText)
-      currentId = chunk.messageId ?? null
-      currentText = chunk.text
-    } else {
-      currentText += chunk.text
+    switch (ev.kind) {
+      case 'agent_message_chunk': {
+        const chunk = ev.payload as AssistantChunk
+        if (typeof chunk.text !== 'string' || chunk.text.length === 0) break
+        if (chunk.messageId !== currentId) {
+          if (currentText.length > 0) messages.push(currentText)
+          currentId = chunk.messageId ?? null
+          currentText = chunk.text
+        } else {
+          currentText += chunk.text
+        }
+        break
+      }
+      case 'user_message_chunk':
+      case 'agent_thought_chunk':
+      case 'tool_call':
+      case 'tool_call_update':
+      case 'plan':
+      case 'permission_request':
+      case 'permission_resolved':
+      case 'stop':
+      case 'subprocess_died':
+      case 'session_destroyed':
+      case 'usage_update':
+      case 'error':
+        break
+      default:
+        assertExhaustive(ev.kind)
     }
   }
   if (currentText.length > 0) messages.push(currentText)
@@ -112,44 +131,62 @@ function buildSummary(events: EventEnvelope[], parentSessionId: string): string 
     currentAssistantText = ''
   }
 
+  // Switch with default: never so adding a new SessionUpdateKind to
+  // types.ts triggers a tsc error here. Each kind is either rendered or
+  // explicitly listed under "intentionally dropped" — the seed is
+  // conversational context, not a wire replay, so most kinds (thoughts,
+  // plans, permissions, usage, stop, subprocess_died, session_destroyed,
+  // error) carry no useful seed content.
   for (const ev of events) {
-    if (ev.kind === 'user_message_chunk') {
-      flushAssistant()
-      const u = ev.payload as UserChunk
-      const text = extractUserText(u.content)
-      if (text.length > 0) lines.push(`U: ${text}`)
-      continue
-    }
-    if (ev.kind === 'agent_message_chunk') {
-      const chunk = ev.payload as AssistantChunk
-      if (typeof chunk.text !== 'string' || chunk.text.length === 0) continue
-      if (chunk.messageId !== currentAssistantId) {
+    switch (ev.kind) {
+      case 'user_message_chunk': {
         flushAssistant()
-        currentAssistantId = chunk.messageId ?? null
-        currentAssistantText = chunk.text
-      } else {
-        currentAssistantText += chunk.text
+        const u = ev.payload as UserChunk
+        const text = extractUserText(u.content)
+        if (text.length > 0) lines.push(`U: ${text}`)
+        break
       }
-      continue
+      case 'agent_message_chunk': {
+        const chunk = ev.payload as AssistantChunk
+        if (typeof chunk.text !== 'string' || chunk.text.length === 0) break
+        if (chunk.messageId !== currentAssistantId) {
+          flushAssistant()
+          currentAssistantId = chunk.messageId ?? null
+          currentAssistantText = chunk.text
+        } else {
+          currentAssistantText += chunk.text
+        }
+        break
+      }
+      case 'tool_call': {
+        flushAssistant()
+        const c = ev.payload as ToolCall
+        const id = typeof c.toolCallId === 'string' ? c.toolCallId : null
+        const name = typeof c.name === 'string' ? c.name : '<unknown>'
+        const inputText = truncate(stringify(c.input), TOOL_TEXT_BUDGET)
+        const update = id ? updates.get(id) : undefined
+        const status = typeof update?.status === 'string' ? update.status : 'pending'
+        const resultText =
+          update !== undefined
+            ? truncate(stringify(update.result), TOOL_TEXT_BUDGET)
+            : '(no result)'
+        lines.push(`[used ${name} (${status}) with input ${inputText}: ${resultText}]`)
+        break
+      }
+      case 'agent_thought_chunk':
+      case 'tool_call_update':
+      case 'plan':
+      case 'permission_request':
+      case 'permission_resolved':
+      case 'stop':
+      case 'subprocess_died':
+      case 'session_destroyed':
+      case 'usage_update':
+      case 'error':
+        break
+      default:
+        assertExhaustive(ev.kind)
     }
-    if (ev.kind === 'tool_call') {
-      flushAssistant()
-      const c = ev.payload as ToolCall
-      const id = typeof c.toolCallId === 'string' ? c.toolCallId : null
-      const name = typeof c.name === 'string' ? c.name : '<unknown>'
-      const inputText = truncate(stringify(c.input), TOOL_TEXT_BUDGET)
-      const update = id ? updates.get(id) : undefined
-      const status = typeof update?.status === 'string' ? update.status : 'pending'
-      const resultText =
-        update !== undefined
-          ? truncate(stringify(update.result), TOOL_TEXT_BUDGET)
-          : '(no result)'
-      lines.push(`[used ${name} (${status}) with input ${inputText}: ${resultText}]`)
-      continue
-    }
-    // Other event kinds (thoughts, plans, permissions, usage, stop,
-    // session_destroyed, subprocess_died) are intentionally dropped —
-    // the seed is conversational context, not a wire replay.
   }
   flushAssistant()
 
@@ -187,3 +224,9 @@ function truncate(text: string, max: number): string {
   if (text.length <= max) return text
   return `${text.slice(0, max)}… (truncated, ${text.length - max} more chars)`
 }
+
+// Compiler-only check: every SessionUpdateKind must be handled in the
+// fork-seed switch above. If a new kind lands in types.ts and isn't
+// added here (either rendered or listed as intentionally dropped), tsc
+// fails with "Argument of type 'X' is not assignable to type 'never'".
+function assertExhaustive(_: never): void {}
