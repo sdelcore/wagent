@@ -5,17 +5,28 @@ import type { SessionBus } from '../bus.js'
 import type { AgentSupervisor } from '../agent/supervisor.js'
 import { probeAgent } from '../agent/availability.js'
 import { buildForkSeed, VALID_FORK_MODES, type ForkMode } from '../sessions/fork.js'
-import { validateSessionOptions } from '../sessions/options.js'
+import { createSession, VALID_AGENTS } from '../sessions/create.js'
 import {
   MAX_DELEGATION_DEPTH,
   type AgentKind,
   type ApiError,
-  type DelegationMode,
   type EventEnvelope,
 } from '../types.js'
 
-const VALID_AGENTS: AgentKind[] = ['claude', 'pi', 'echo']
-const VALID_DELEGATION_MODES: DelegationMode[] = ['sync', 'background']
+// Map a createSession failure code to an HTTP status. The codes are the
+// stable contract; this table is the route's local choice of how to
+// surface them.
+const CREATE_SESSION_STATUS: Record<string, number> = {
+  invalid_agent: 400,
+  invalid_cwd: 400,
+  invalid_options: 400,
+  invalid_parent: 400,
+  invalid_delegation_mode: 400,
+  parent_not_found: 404,
+  parent_destroyed: 410,
+  depth_cap_exceeded: 400,
+  agent_not_available: 409,
+}
 
 // Cap the number of parent events we walk when building a fork seed.
 // Forks are lossy by design; pulling unbounded history hurts both the
@@ -31,15 +42,6 @@ const FORK_EVENT_PAGE = 500
 function bad(reply: FastifyReply, status: number, code: string, message: string): ApiError {
   reply.code(status)
   return { error: { code, message } }
-}
-
-function validateCwd(cwd: unknown): string | null {
-  if (typeof cwd !== 'string') return null
-  const trimmed = cwd.trim()
-  if (trimmed.length === 0) return null
-  if (trimmed.startsWith('~')) return null
-  if (!trimmed.startsWith('/')) return null
-  return trimmed
 }
 
 export interface SessionsDeps {
@@ -71,94 +73,29 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionsDeps) 
     }
   }>('/v1/sessions', async (req, reply) => {
     const body = req.body ?? {}
-    const agent = body.agent
-    if (typeof agent !== 'string' || !VALID_AGENTS.includes(agent as AgentKind)) {
-      return bad(reply, 400, 'invalid_agent', `agent must be one of ${VALID_AGENTS.join(', ')}`)
+    // POST historically coalesces delegationMode: null → 'sync' (a null
+    // on the wire was treated as "default"). createSession treats null
+    // as "no mode at all" (the fork case). Normalise here so POST's
+    // wire behaviour is preserved.
+    const delegationMode = body.delegationMode === null ? undefined : body.delegationMode
+    const result = await createSession(
+      {
+        agent: body.agent,
+        cwd: body.cwd,
+        alias: body.alias,
+        model: body.model,
+        options: body.options,
+        parentSessionId: body.parentSessionId,
+        parentToolCallId: body.parentToolCallId,
+        delegationMode,
+      },
+      { sessionStore: store, probeAgent },
+    )
+    if (!result.ok) {
+      return bad(reply, CREATE_SESSION_STATUS[result.code] ?? 400, result.code, result.message)
     }
-    // Precheck: refuse early if the agent isn't available on this host
-    // so the caller gets a meaningful error code instead of a 500 at
-    // subprocess spawn time.
-    const availability = await probeAgent(agent as AgentKind)
-    if (!availability.installed) {
-      return bad(
-        reply,
-        409,
-        'agent_not_available',
-        availability.notes ?? `agent ${agent} is not available on this host`,
-      )
-    }
-    const cwd = validateCwd(body.cwd)
-    if (!cwd) {
-      return bad(
-        reply,
-        400,
-        'invalid_cwd',
-        'cwd must be an absolute path (no ~ expansion, no relative paths)',
-      )
-    }
-    const optionsResult = validateSessionOptions(body.options)
-    if (!optionsResult.ok) {
-      return bad(reply, 400, optionsResult.code, optionsResult.message)
-    }
-    // Delegation fields. If parentSessionId is set, validate the parent
-    // exists, isn't destroyed, and the resulting depth is within the cap.
-    let delegationDepth = 0
-    let parentSessionId: string | null = null
-    let parentToolCallId: string | null = null
-    let delegationMode: DelegationMode | null = null
-    if (body.parentSessionId) {
-      if (typeof body.parentSessionId !== 'string') {
-        return bad(reply, 400, 'invalid_parent', 'parentSessionId must be a string')
-      }
-      const parent = store.get(body.parentSessionId)
-      if (!parent) {
-        return bad(reply, 404, 'parent_not_found', `parent session ${body.parentSessionId} not found`)
-      }
-      if (parent.destroyedAt !== null) {
-        return bad(reply, 410, 'parent_destroyed', 'parent session is destroyed')
-      }
-      delegationDepth = parent.delegationDepth + 1
-      if (delegationDepth > MAX_DELEGATION_DEPTH) {
-        return bad(
-          reply,
-          400,
-          'depth_cap_exceeded',
-          `delegationDepth ${delegationDepth} exceeds cap ${MAX_DELEGATION_DEPTH}`,
-        )
-      }
-      parentSessionId = parent.id
-      parentToolCallId =
-        typeof body.parentToolCallId === 'string' ? body.parentToolCallId : null
-      if (body.delegationMode !== undefined && body.delegationMode !== null) {
-        if (
-          typeof body.delegationMode !== 'string' ||
-          !VALID_DELEGATION_MODES.includes(body.delegationMode as DelegationMode)
-        ) {
-          return bad(
-            reply,
-            400,
-            'invalid_delegation_mode',
-            `delegationMode must be one of ${VALID_DELEGATION_MODES.join(', ')}`,
-          )
-        }
-        delegationMode = body.delegationMode as DelegationMode
-      } else {
-        delegationMode = 'sync'
-      }
-    }
-    const session = store.create({
-      agent: agent as AgentKind,
-      cwd,
-      alias: typeof body.alias === 'string' ? body.alias : null,
-      model: typeof body.model === 'string' ? body.model : null,
-      parentSessionId,
-      parentToolCallId,
-      delegationDepth,
-      delegationMode,
-      options: optionsResult.value,
-    })
     reply.code(201)
-    return session
+    return result.value
   })
 
   app.get<{
@@ -229,10 +166,6 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionsDeps) 
     Body: { agent?: string; model?: string | null; mode?: string }
   }>('/v1/sessions/:id/fork', async (req, reply) => {
     const body = req.body ?? {}
-    const agent = body.agent
-    if (typeof agent !== 'string' || !VALID_AGENTS.includes(agent as AgentKind)) {
-      return bad(reply, 400, 'invalid_agent', `agent must be one of ${VALID_AGENTS.join(', ')}`)
-    }
     let mode: ForkMode = 'summary'
     if (body.mode !== undefined) {
       if (typeof body.mode !== 'string' || !VALID_FORK_MODES.includes(body.mode as ForkMode)) {
@@ -244,37 +177,12 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionsDeps) 
       return bad(reply, 400, 'invalid_model', 'model must be a string or null')
     }
 
+    // Early parent fetch so we can (a) return fork's existing 404 code
+    // 'not_found' for a missing parent (createSession would surface
+    // 'parent_not_found' instead, which would change wire behaviour),
+    // and (b) read parent.cwd for the child.
     const parent = store.get(req.params.id)
     if (!parent) return bad(reply, 404, 'not_found', `session ${req.params.id} not found`)
-    if (parent.destroyedAt !== null) {
-      return bad(reply, 410, 'parent_destroyed', 'parent session is destroyed')
-    }
-
-    // Same depth-cap rule as a delegated child: a fork at depth N+1
-    // counts toward the cap so a runaway failover loop can't outgrow
-    // the tree.
-    const delegationDepth = parent.delegationDepth + 1
-    if (delegationDepth > MAX_DELEGATION_DEPTH) {
-      return bad(
-        reply,
-        400,
-        'depth_cap_exceeded',
-        `delegationDepth ${delegationDepth} exceeds cap ${MAX_DELEGATION_DEPTH}`,
-      )
-    }
-
-    // Refuse forks targeting a harness that isn't installed, same as
-    // POST /v1/sessions, so the caller gets a clean 409 instead of a
-    // spawn-time 500.
-    const availability = await probeAgent(agent as AgentKind)
-    if (!availability.installed) {
-      return bad(
-        reply,
-        409,
-        'agent_not_available',
-        availability.notes ?? `agent ${agent} is not available on this host`,
-      )
-    }
 
     // Walk the parent's full event log in chronological order. We
     // bound the walk at MAX_FORK_EVENTS so a runaway parent doesn't
@@ -291,22 +199,25 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionsDeps) 
 
     const seed = buildForkSeed(events, mode, parent.id)
 
-    // Create the child row first so it's queryable via descendants
-    // even if the seed prompt fails downstream.
-    //
-    // delegationMode is left null on purpose: a fork is not a sync /
-    // background delegation, just a parent-link for queryability. The
-    // delegate-MCP path is what cares about that field.
-    const child = store.create({
-      agent: agent as AgentKind,
-      cwd: parent.cwd,
-      alias: null,
-      model: typeof body.model === 'string' ? body.model : null,
-      parentSessionId: parent.id,
-      parentToolCallId: null,
-      delegationDepth,
-      delegationMode: null,
-    })
+    // delegationMode: null is the fork-specific signal — a fork is not a
+    // sync / background delegation, just a parent-link for queryability.
+    // createSession respects an explicit null.
+    const result = await createSession(
+      {
+        agent: body.agent,
+        cwd: parent.cwd,
+        alias: null,
+        model: body.model,
+        parentSessionId: parent.id,
+        parentToolCallId: null,
+        delegationMode: null,
+      },
+      { sessionStore: store, probeAgent },
+    )
+    if (!result.ok) {
+      return bad(reply, CREATE_SESSION_STATUS[result.code] ?? 400, result.code, result.message)
+    }
+    const child = result.value
 
     // Seed the new session with the leading user message before its
     // first turn fires, so any client subscribing to the child sees

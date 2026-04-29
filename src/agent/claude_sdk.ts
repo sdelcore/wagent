@@ -18,6 +18,7 @@ import type {
   Session,
   SessionUpdate,
 } from '../types.js'
+import { makeError } from './errors.js'
 
 // ---------------------------------------------------------------------------
 // Pure translation
@@ -155,20 +156,20 @@ export function translateStopReason(
 export function classifyAssistantError(tag: SDKAssistantMessageError): ErrorPayload {
   switch (tag) {
     case 'rate_limit':
-      return { category: 'rate_limit', retryable: true, message: 'rate limit exceeded' }
+      return makeError('rate_limit', 'rate limit exceeded')
     case 'authentication_failed':
-      return { category: 'auth', retryable: false, message: 'authentication failed' }
+      return makeError('auth', 'authentication failed')
     case 'billing_error':
-      return { category: 'quota', retryable: false, message: 'billing / quota exhausted' }
+      return makeError('quota', 'billing / quota exhausted')
     case 'server_error':
-      return { category: 'upstream_5xx', retryable: true, message: 'upstream 5xx' }
+      return makeError('upstream_5xx', 'upstream 5xx')
     case 'invalid_request':
-      return { category: 'internal', retryable: false, message: 'invalid request' }
+      return makeError('internal', 'invalid request')
     case 'max_output_tokens':
-      return { category: 'internal', retryable: false, message: 'max output tokens reached' }
+      return makeError('internal', 'max output tokens reached')
     case 'unknown':
     default:
-      return { category: 'internal', retryable: false, message: 'unknown upstream error' }
+      return makeError('internal', 'unknown upstream error')
   }
 }
 
@@ -178,7 +179,7 @@ export function classifyAssistantError(tag: SDKAssistantMessageError): ErrorPayl
 // a direct dep on that transitive package.
 export function classifyThrownError(err: unknown): ErrorPayload {
   if (err === null || err === undefined) {
-    return { category: 'internal', retryable: false, message: 'unknown error' }
+    return makeError('internal', 'unknown error')
   }
   const e = err as {
     name?: string
@@ -190,13 +191,12 @@ export function classifyThrownError(err: unknown): ErrorPayload {
   }
   const message = e.message ?? String(err)
 
-  // Aborts: surfaced as transport when not a clean cancel (which the
-  // adapter handles separately via `aborted=true`).
+  // A deliberate AbortError is transport-shaped but not retryable — the
+  // user pulled the plug, retrying would be wrong. Override the table.
   if (e.name === 'AbortError' || e.name === 'APIUserAbortError') {
-    return { category: 'transport', retryable: false, message }
+    return makeError('transport', message, { retryable: false })
   }
 
-  // Connection / DNS / TLS / fetch network failures.
   const causeCode = e.cause?.code
   if (
     e.name === 'APIConnectionError' ||
@@ -208,40 +208,30 @@ export function classifyThrownError(err: unknown): ErrorPayload {
     causeCode === 'ETIMEDOUT' ||
     causeCode === 'ENOTFOUND'
   ) {
-    return { category: 'transport', retryable: true, message }
+    return makeError('transport', message)
   }
 
   const status = typeof e.status === 'number' ? e.status : undefined
   if (status !== undefined) {
     const retryAfterMs = readRetryAfterMs(e.headers)
     if (status === 429) {
-      return {
-        category: 'rate_limit',
-        retryable: true,
-        message,
-        ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
-      }
+      return makeError('rate_limit', message, { retryAfterMs })
     }
     if (status === 401 || status === 403) {
-      return { category: 'auth', retryable: false, message }
+      return makeError('auth', message)
     }
     if (status === 402) {
-      return { category: 'quota', retryable: false, message }
+      return makeError('quota', message)
     }
     if (status >= 500 && status < 600) {
-      return {
-        category: 'upstream_5xx',
-        retryable: true,
-        message,
-        ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
-      }
+      return makeError('upstream_5xx', message, { retryAfterMs })
     }
     if (status >= 400 && status < 500) {
-      return { category: 'internal', retryable: false, message }
+      return makeError('internal', message)
     }
   }
 
-  return { category: 'internal', retryable: false, message }
+  return makeError('internal', message)
 }
 
 function readRetryAfterMs(

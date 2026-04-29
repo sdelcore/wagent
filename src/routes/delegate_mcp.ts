@@ -3,9 +3,8 @@ import type { SessionStore } from '../sessions/store.js'
 import type { AgentSupervisor } from '../agent/supervisor.js'
 import type { DelegateTokenStore } from '../agent/delegate_tokens.js'
 import { probeAgent } from '../agent/availability.js'
-import { validateSessionOptions } from '../sessions/options.js'
+import { createSession, VALID_AGENTS } from '../sessions/create.js'
 import {
-  MAX_DELEGATION_DEPTH,
   type AgentKind,
   type ContentBlock,
   type DelegationMode,
@@ -28,8 +27,6 @@ import type { SessionBus } from '../bus.js'
 // Claude SDK) negotiate to a version both sides support; if a future
 // client demands newer than this we'll need to bump.
 const PROTOCOL_VERSION = '2025-06-18'
-
-const VALID_AGENTS: AgentKind[] = ['claude', 'pi', 'echo']
 
 interface JsonRpcRequest {
   jsonrpc: '2.0'
@@ -107,7 +104,7 @@ export function registerDelegateMcpRoutes(app: FastifyInstance, deps: DelegateMc
     const responses: JsonRpcResponse[] = []
     const messages = Array.isArray(body) ? body : [body]
     for (const msg of messages) {
-      const resp = await dispatch(msg, parentSessionId, entry.parentDepth, deps, app)
+      const resp = await dispatch(msg, parentSessionId, deps, app)
       if (resp) responses.push(resp)
     }
 
@@ -137,7 +134,6 @@ function isLoopback(ip: string | undefined): boolean {
 async function dispatch(
   msg: JsonRpcRequest,
   parentSessionId: string,
-  parentDepth: number,
   deps: DelegateMcpDeps,
   app: FastifyInstance,
 ): Promise<JsonRpcResponse | null> {
@@ -173,7 +169,6 @@ async function dispatch(
             const result = await runDelegate(
               params.arguments as DelegateArgs | undefined,
               parentSessionId,
-              parentDepth,
               deps,
               app,
             )
@@ -349,7 +344,6 @@ function toolError(text: string, structured?: Record<string, unknown>): ToolResu
 async function runDelegate(
   args: DelegateArgs | undefined,
   parentSessionId: string,
-  parentDepth: number,
   deps: DelegateMcpDeps,
   app: FastifyInstance,
 ): Promise<ToolResult> {
@@ -357,9 +351,6 @@ async function runDelegate(
     return toolError('delegate: missing arguments')
   }
   const { harness, prompt, cwd: cwdArg, model, mode: modeArg, options: optionsArg } = args
-  if (!harness || !VALID_AGENTS.includes(harness)) {
-    return toolError(`delegate: harness must be one of ${VALID_AGENTS.join(', ')}`)
-  }
   if (typeof prompt !== 'string' || prompt.length === 0) {
     return toolError('delegate: prompt must be a non-empty string')
   }
@@ -367,51 +358,35 @@ async function runDelegate(
   if (modeArg !== undefined && !VALID_MODES.includes(modeArg)) {
     return toolError(`delegate: mode must be one of ${VALID_MODES.join(', ')}`)
   }
-  // Per-child SessionOptions — same shape, same validator, same error
-  // codes as POST /v1/sessions. Persisted on the child row so the
-  // adapter picks them up at spawn time.
-  const optionsResult = validateSessionOptions(optionsArg)
-  if (!optionsResult.ok) {
-    return toolError(`delegate: ${optionsResult.message}`)
-  }
 
+  // Pre-fetch parent for clean toolError UX on missing/destroyed parent
+  // and to default child cwd to parent.cwd. createSession will re-fetch
+  // and re-validate — fine, in-process SQLite read.
   const parent = deps.sessionStore.get(parentSessionId)
   if (!parent) return toolError(`delegate: parent session ${parentSessionId} not found`)
   if (parent.destroyedAt !== null) {
     return toolError('delegate: parent session is destroyed')
   }
 
-  if (parentDepth + 1 > MAX_DELEGATION_DEPTH) {
-    return toolError(
-      `delegate: depth cap exceeded (max ${MAX_DELEGATION_DEPTH})`,
-      { childDepth: parentDepth + 1 },
-    )
-  }
-
   const cwd = cwdArg && cwdArg.length > 0 ? cwdArg : parent.cwd
-  if (!cwd.startsWith('/')) {
-    return toolError('delegate: cwd must be an absolute path')
-  }
 
-  const availability = await probeAgent(harness)
-  if (!availability.installed) {
-    return toolError(
-      `delegate: harness ${harness} is not available on this host` +
-        (availability.notes ? ` (${availability.notes})` : ''),
-    )
+  const result = await createSession(
+    {
+      agent: harness,
+      cwd,
+      alias: null,
+      model: model ?? null,
+      options: optionsArg,
+      parentSessionId: parent.id,
+      parentToolCallId: null,
+      delegationMode: mode,
+    },
+    { sessionStore: deps.sessionStore, probeAgent },
+  )
+  if (!result.ok) {
+    return toolError(`delegate: ${result.message}`, { code: result.code })
   }
-
-  const child = deps.sessionStore.create({
-    agent: harness,
-    cwd,
-    alias: null,
-    model: model ?? null,
-    parentSessionId: parent.id,
-    parentToolCallId: null,
-    delegationDepth: parentDepth + 1,
-    delegationMode: mode,
-    options: optionsResult.value,
-  })
+  const child = result.value
   app.log.info(
     {
       childId: child.id,
@@ -452,24 +427,7 @@ async function runDelegate(
   }
 
   // Sync mode: subscribe before spawning so we don't miss any events.
-  let finalText = ''
-  let stopReason: string | null = null
-  const stopPromise = new Promise<void>((resolve) => {
-    const unsubscribe = deps.bus.subscribe(child.id, (ev) => {
-      const payload = ev.payload as SessionUpdate & { text?: string; reason?: string }
-      if (payload.kind === 'agent_message_chunk' && typeof payload.text === 'string') {
-        finalText += payload.text
-      } else if (payload.kind === 'stop') {
-        stopReason = payload.reason ?? 'end_turn'
-        unsubscribe()
-        resolve()
-      } else if (payload.kind === 'subprocess_died' || payload.kind === 'session_destroyed') {
-        stopReason = payload.kind
-        unsubscribe()
-        resolve()
-      }
-    })
-  })
+  const turn = awaitTurn(deps.bus, child.id)
 
   let proc
   try {
@@ -486,7 +444,7 @@ async function runDelegate(
     app.log.error({ err, childId: child.id }, 'delegate: child prompt failed')
   })
 
-  await stopPromise
+  const { finalText, stopReason } = await turn
 
   const text = finalText.length > 0 ? finalText : `(child stopped: ${stopReason})`
   return {
@@ -608,4 +566,30 @@ async function runDelegateCancel(
     content: [{ type: 'text', text: `(cancel requested for ${child.id})` }],
     structuredContent: { status: 'cancelling', childSessionId: child.id },
   }
+}
+
+interface TurnResult {
+  finalText: string
+  stopReason: string
+}
+
+// Subscribe to a child's bus, accumulate assistant text, resolve when
+// the session reaches a terminal event. Caller must invoke this before
+// spawning so no early events are missed.
+function awaitTurn(bus: SessionBus, childSessionId: string): Promise<TurnResult> {
+  return new Promise<TurnResult>((resolve) => {
+    let finalText = ''
+    const unsubscribe = bus.subscribe(childSessionId, (ev) => {
+      const payload = ev.payload as SessionUpdate & { text?: string; reason?: string }
+      if (payload.kind === 'agent_message_chunk' && typeof payload.text === 'string') {
+        finalText += payload.text
+      } else if (payload.kind === 'stop') {
+        unsubscribe()
+        resolve({ finalText, stopReason: payload.reason ?? 'end_turn' })
+      } else if (payload.kind === 'subprocess_died' || payload.kind === 'session_destroyed') {
+        unsubscribe()
+        resolve({ finalText, stopReason: payload.kind })
+      }
+    })
+  })
 }
