@@ -429,6 +429,17 @@ class ClaudeSdkAgent implements AgentProcess {
       ...(sessionOpts?.allowedTools !== undefined
         ? { allowedTools: sessionOpts.allowedTools }
         : {}),
+      // disallowedTools is a *hard* filter — the SDK removes these tools
+      // from the model's context entirely. Survives bypassPermissions, so
+      // callers (e.g. ARIA's orchestrator) can guarantee certain tools
+      // (Task / Agent) are never reachable even with the bypass mode set.
+      ...(sessionOpts?.disallowedTools !== undefined
+        ? { disallowedTools: sessionOpts.disallowedTools }
+        : {}),
+      // tools selects the base built-in set the model sees. `[]` strips
+      // every built-in; `{ type: 'preset', preset: 'claude_code' }` opts
+      // back in. Unset → SDK default.
+      ...(sessionOpts?.tools !== undefined ? { tools: sessionOpts.tools } : {}),
       ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
       // resume picks up an existing Claude Code transcript by session
       // UUID — the SDK loads it from `~/.claude/projects/<encoded

@@ -81,10 +81,25 @@ export const RESERVED_MCP_SERVER_NAME = 'wagent-delegate'
 //     to surface caller mistakes early).
 export type PermissionMode = 'default' | 'ask' | 'bypass'
 
+// Built-in tool selector. Mirrors the Claude Agent SDK's `tools`
+// option: an explicit string[] is the base set of built-ins to expose
+// (`[]` disables every built-in); the `preset` form opts into all
+// default Claude Code built-ins. See sdk.d.ts:
+// `tools?: string[] | { type: 'preset'; preset: 'claude_code' }`.
+export type BuiltinToolSelector = string[] | { type: 'preset'; preset: 'claude_code' }
+
 export interface SessionOptions {
   systemPrompt?: string
   appendSystemPrompt?: string
   allowedTools?: string[]
+  // Hard-deny list. Removed from the model's context — `bypassPermissions`
+  // does not override this. Use when a caller (e.g. ARIA's orchestrator)
+  // needs to *forbid* a tool, not just *not auto-allow* it.
+  disallowedTools?: string[]
+  // Base built-in tool set. `[]` strips all built-ins (Read/Edit/Bash/
+  // Agent/...) — useful for routing-only personas that should only
+  // reach MCP tools. Defaults to all Claude Code built-ins when unset.
+  tools?: BuiltinToolSelector
   mcpServers?: Record<string, McpServerSpec>
   permissionMode?: PermissionMode
   resume?: string

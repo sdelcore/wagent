@@ -83,3 +83,54 @@ test('mcpServers: empty record collapses to absent (does not persist {})', () =>
   // Empty mcpServers + no other fields → null overall (the empty-object collapse).
   if (res.ok) assert.equal(res.value, null)
 })
+
+test('disallowedTools: string[] accepted', () => {
+  const res = validateSessionOptions({ disallowedTools: ['Task', 'Agent'] })
+  assert.equal(res.ok, true)
+  if (res.ok) assert.deepEqual(res.value, { disallowedTools: ['Task', 'Agent'] })
+})
+
+test('disallowedTools: non-array rejected', () => {
+  const res = validateSessionOptions({ disallowedTools: 'Agent' })
+  assert.equal(res.ok, false)
+  if (!res.ok) assert.match(res.message, /disallowedTools/)
+})
+
+test('disallowedTools: non-string entry rejected', () => {
+  const res = validateSessionOptions({ disallowedTools: ['Agent', 7] })
+  assert.equal(res.ok, false)
+})
+
+test('tools: string[] accepted (explicit built-in allowlist)', () => {
+  const res = validateSessionOptions({ tools: ['Read', 'Bash'] })
+  assert.equal(res.ok, true)
+  if (res.ok) assert.deepEqual(res.value, { tools: ['Read', 'Bash'] })
+})
+
+test('tools: empty array accepted (strip all built-ins)', () => {
+  const res = validateSessionOptions({ tools: [] })
+  assert.equal(res.ok, true)
+  if (res.ok) assert.deepEqual(res.value, { tools: [] })
+})
+
+test('tools: claude_code preset accepted', () => {
+  const res = validateSessionOptions({ tools: { type: 'preset', preset: 'claude_code' } })
+  assert.equal(res.ok, true)
+  if (res.ok) assert.deepEqual(res.value, { tools: { type: 'preset', preset: 'claude_code' } })
+})
+
+test('tools: unknown preset rejected', () => {
+  const res = validateSessionOptions({ tools: { type: 'preset', preset: 'something_else' } })
+  assert.equal(res.ok, false)
+  if (!res.ok) assert.match(res.message, /tools/)
+})
+
+test('tools: array with non-string entry rejected', () => {
+  const res = validateSessionOptions({ tools: ['Read', 7] })
+  assert.equal(res.ok, false)
+})
+
+test('tools: scalar rejected', () => {
+  const res = validateSessionOptions({ tools: 'Read' })
+  assert.equal(res.ok, false)
+})
