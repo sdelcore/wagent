@@ -53,6 +53,47 @@ export function validateSessionOptions(raw: unknown): ValidatedOptions {
     }
     out.allowedTools = obj.allowedTools as string[]
   }
+  if (obj.disallowedTools !== undefined) {
+    if (
+      !Array.isArray(obj.disallowedTools) ||
+      !obj.disallowedTools.every((t) => typeof t === 'string')
+    ) {
+      return {
+        ok: false,
+        code: 'invalid_options',
+        message: 'options.disallowedTools must be an array of strings',
+      }
+    }
+    out.disallowedTools = obj.disallowedTools as string[]
+  }
+  if (obj.tools !== undefined) {
+    const t = obj.tools
+    if (Array.isArray(t)) {
+      if (!t.every((x) => typeof x === 'string')) {
+        return {
+          ok: false,
+          code: 'invalid_options',
+          message: 'options.tools array entries must be strings',
+        }
+      }
+      out.tools = t as string[]
+    } else if (
+      t !== null &&
+      typeof t === 'object' &&
+      !Array.isArray(t) &&
+      (t as Record<string, unknown>).type === 'preset' &&
+      (t as Record<string, unknown>).preset === 'claude_code'
+    ) {
+      out.tools = { type: 'preset', preset: 'claude_code' }
+    } else {
+      return {
+        ok: false,
+        code: 'invalid_options',
+        message:
+          "options.tools must be a string[] or { type: 'preset', preset: 'claude_code' }",
+      }
+    }
+  }
   if (obj.mcpServers !== undefined) {
     const validated = validateMcpServers(obj.mcpServers)
     if (!validated.ok) return validated
@@ -110,6 +151,8 @@ export function validateSessionOptions(raw: unknown): ValidatedOptions {
     out.systemPrompt === undefined &&
     out.appendSystemPrompt === undefined &&
     out.allowedTools === undefined &&
+    out.disallowedTools === undefined &&
+    out.tools === undefined &&
     out.mcpServers === undefined &&
     out.permissionMode === undefined &&
     out.resume === undefined &&

@@ -183,7 +183,11 @@ time:
 options?: {
   systemPrompt?: string         // replaces the harness's default prompt
   appendSystemPrompt?: string   // layered onto the harness's default
-  allowedTools?: string[]       // tool-name allowlist
+  allowedTools?: string[]       // auto-allow list (NOT a hard restriction)
+  disallowedTools?: string[]    // hard deny — survives bypassPermissions
+  tools?:                       // base built-in set; [] strips all built-ins
+    | string[]
+    | { type: 'preset'; preset: 'claude_code' }
   mcpServers?: Record<string, McpServerSpec>  // per-session MCP servers
   permissionMode?:              // gate every tool call, or bypass entirely
     | 'default'
@@ -214,7 +218,9 @@ Per-adapter behavior:
 |---|---|---|---|
 | `systemPrompt` | passes through to `query({ options: { systemPrompt } })` (replaces preset) | applied via a `DefaultResourceLoader` with `systemPrompt` set (replaces pi's preset) | ignored |
 | `appendSystemPrompt` | wrapped as `{ type: 'preset', preset: 'claude_code', append }` | wrapped as `[appendSystemPrompt]` and passed to `DefaultResourceLoader.appendSystemPrompt` | ignored |
-| `allowedTools` | passes straight through to `query({ options: { allowedTools } })` | passes through to `createAgentSession({ tools })` | ignored |
+| `allowedTools` | passes straight through to `query({ options: { allowedTools } })`. Note: this is an *auto-allow* list, not a hard restriction — `permissionMode: 'bypass'` relaxes its enforcement. Use `disallowedTools` or `tools` for hard restrictions. | passes through to `createAgentSession({ tools })` | ignored |
+| `disallowedTools` | passes straight through to `query({ options: { disallowedTools } })`. Hard filter — listed tools are removed from the model's context entirely, even under `permissionMode: 'bypass'`. Useful when a parent (e.g. ARIA's orchestrator) needs to forbid the SDK's native `Task` / `Agent` so the model is forced into `mcp__wagent-delegate__delegate`. | ignored with a warn log — pi-coding-agent has no equivalent | ignored |
+| `tools` | passes straight through. `[]` strips every built-in (Read/Edit/Bash/Agent/...); `{ type: 'preset', preset: 'claude_code' }` opts back into the full default set; an explicit `string[]` declares the base built-ins. Combine with `mcpServers` for routing-only personas that should only reach MCP tools. | ignored | ignored |
 | `mcpServers` | merged into `query({ options: { mcpServers } })` alongside the per-spawn `wagent-delegate` server | ignored with a warn log — pi-coding-agent has no per-session MCP plumbing | ignored |
 | `permissionMode` | `'bypass'` → SDK `permissionMode: 'bypassPermissions'` + `allowDangerouslySkipPermissions: true`, no `canUseTool`. `'default'` / `'ask'` / unset keep wagent's `canUseTool` gate. | ignored (pi has no gate) | ignored |
 | `resume` | passes straight through to `query({ options: { resume } })` — the SDK loads `~/.claude/projects/<encoded cwd>/<uuid>.jsonl` and the wagent session continues from that transcript. The wagent session's `cwd` must match the cwd of the original CLI invocation, otherwise the SDK can't locate the file. | ignored (pi has no transcript-resume primitive) | ignored |
