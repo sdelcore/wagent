@@ -276,11 +276,18 @@ instead — there is no `mode: "none"` variant of `/fork`.
 
 ## Auth
 
-Optional bearer token via `WAGENT_TOKEN`. Loopback solo-dev with no
-token is fine; any non-loopback exposure (LAN / Tailnet) should set
-one. Checked in a single `onRequest` hook before routes run.
+Optional bearer token via `WAGENT_AUTH_TOKEN`. Loopback solo-dev with
+no token is fine; any non-loopback exposure (LAN / Tailnet) should
+set one. Checked in a single `onRequest` hook before routes run via
+`crypto.timingSafeEqual` so attackers can't learn the token byte-by-
+byte through timing. Rejections log the masked token prefix + remote
+addr at `warn`.
 
-`/mcp/delegate/*` is exempt from `WAGENT_TOKEN` and uses its own
+`/v1/health` and `/v1/meta` go through the same hook and require the
+token when one is configured — there are no unauthenticated peek
+holes for session IDs or capability info.
+
+`/mcp/delegate/*` is exempt from `WAGENT_AUTH_TOKEN` and uses its own
 per-spawn token, loopback-only. See [delegation.md](./delegation.md).
 
 ## Out of scope

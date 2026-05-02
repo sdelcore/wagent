@@ -160,7 +160,7 @@
               example = "/run/agenix/wagent.env";
               description = ''
                 Path to a file with secrets in `KEY=value` form. Sourced by
-                systemd before wagent starts. Use this for `WAGENT_TOKEN`,
+                systemd before wagent starts. Use this for `WAGENT_AUTH_TOKEN`,
                 `ANTHROPIC_API_KEY`, etc.
               '';
             };
