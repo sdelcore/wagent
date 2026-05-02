@@ -33,7 +33,7 @@ against `nodejs_22`'s V8 headers) before the systemd unit comes up.
     port = 2468;
     cors = "https://droidcode.example.ts.net";
     openFirewall = true;
-    environmentFile = "/run/agenix/wagent.env";  # WAGENT_TOKEN, ANTHROPIC_API_KEY
+    environmentFile = "/run/agenix/wagent.env";  # WAGENT_AUTH_TOKEN, ANTHROPIC_API_KEY
     extraEnvironment.LOG_LEVEL = "debug";
   };
 }
@@ -150,7 +150,7 @@ npm run smoke           # one-turn echo run
 | `WAGENT_HOST` | `0.0.0.0` | listen host |
 | `WAGENT_PORT` | `2468` | listen port |
 | `WAGENT_DB` | `~/.local/share/wagent/wagent.sqlite` | SQLite path |
-| `WAGENT_TOKEN` | *(unset)* | bearer token; clients send `Authorization: Bearer <token>` |
+| `WAGENT_AUTH_TOKEN` | *(unset)* | bearer token; clients send `Authorization: Bearer <token>`. Required when binding to non-loopback. |
 | `WAGENT_CORS` | `*` | comma-separated origin allowlist |
 | `LOG_LEVEL` | `info` | Fastify logger level |
 | `CLAUDE_CODE_EXECUTABLE` | *(auto-detected via `which claude`)* | path to the `claude` binary the SDK shells out to. Set when the bundled binary doesn't run on your libc (e.g. NixOS picks the musl variant by default). |

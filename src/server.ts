@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import Fastify, { type FastifyBaseLogger } from 'fastify'
 import cors from '@fastify/cors'
 import { loadConfig } from './config.js'
+import { registerAuthHook } from './auth.js'
 import { openDatabase } from './db.js'
 import { SessionStore } from './sessions/store.js'
 import { EventStore } from './events/store.js'
@@ -42,18 +43,10 @@ async function main() {
   })
 
   if (config.token) {
-    app.addHook('onRequest', async (req, reply) => {
-      if (req.method === 'OPTIONS') return
-      // Delegate MCP has its own auth (per-spawn token, loopback-only).
-      // Don't gate it behind WAGENT_TOKEN — the harness child process
-      // has no business knowing that token.
-      if (req.url.startsWith('/mcp/delegate/')) return
-      const header = req.headers.authorization ?? ''
-      const match = /^Bearer\s+(.+)$/i.exec(header)
-      if (!match || match[1] !== config.token) {
-        reply.code(401).send({ error: { code: 'unauthorized' } })
-      }
-    })
+    registerAuthHook(app, config.token)
+    app.log.info('auth: enabled (token configured via WAGENT_AUTH_TOKEN)')
+  } else {
+    app.log.info('auth: disabled (loopback-only deployment assumed)')
   }
 
   // Shallow by default: just confirms Fastify is accepting requests.

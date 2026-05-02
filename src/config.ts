@@ -27,7 +27,7 @@ export function loadConfig(): Config {
     dbPath:
       process.env.WAGENT_DB ??
       resolve(homedir(), '.local/share/wagent/wagent.sqlite'),
-    token: process.env.WAGENT_TOKEN,
+    token: process.env.WAGENT_AUTH_TOKEN,
     corsOrigins: parseOrigins(process.env.WAGENT_CORS),
     logLevel: process.env.LOG_LEVEL ?? 'info',
     hostname: hostname(),

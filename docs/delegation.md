@@ -52,7 +52,7 @@ over loopback. No subprocess, no env-var token leakage.
 - Per-spawn auth: when the supervisor spawns a parent harness, it
   mints a token bound to `(parentSessionId, depth)` and stores it
   in `DelegateTokenStore`. The MCP endpoint accepts only this token
-  in `Authorization: Bearer …`, **bypassing the global `WAGENT_TOKEN`
+  in `Authorization: Bearer …`, **bypassing the global `WAGENT_AUTH_TOKEN`
   gate**. Loopback-only (rejects non-127.x source IPs).
 - `src/agent/claude_sdk.ts` injects the server config into the
   Claude SDK via `mcpServers: { 'wagent-delegate': { type: 'http',
