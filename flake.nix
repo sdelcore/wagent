@@ -18,7 +18,7 @@
           # copy the actual hash out of the error message.
           npmDeps = pkgs.fetchNpmDeps {
             src = ./.;
-            hash = "sha256-GAiQzBXG4v79bNsQtYYUkP7Elo+Qq2Xmx99RDg03hy4=";
+            hash = "sha256-dhewTUKMk14tV2e90WZzNbh2tXiAB5q3x/rb5Vk1pes=";
           };
 
           # Source as a Nix derivation — used by the NixOS module so hosts
@@ -74,6 +74,11 @@
               mkdir -p $out/bin
               makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/wagent \
                 --add-flags "$out/lib/wagent/dist/server.js"
+              # `wagent-on` ships alongside the daemon as a first-party
+              # CLI for cross-host dispatch. Same node, same install
+              # tree — just a second entry point.
+              makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/wagent-on \
+                --add-flags "$out/lib/wagent/dist/cli/on.js"
               runHook postInstall
             '';
 
