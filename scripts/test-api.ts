@@ -217,13 +217,59 @@ test('GET /v1/meta → name+version+hostname+home', async () => {
 })
 
 test('GET /v1/agents → list with echo always installed', async () => {
-  const r = await json<{ agents: { id: string; installed: boolean; reason?: string }[] }>(
-    'GET',
-    '/v1/agents',
-  )
+  const r = await json<{
+    agents: {
+      id: string
+      installed: boolean
+      reason?: string
+      models?: { id: string; available: boolean }[]
+    }[]
+  }>('GET', '/v1/agents')
   const echo = r.agents.find((a) => a.id === 'echo')
   assert.ok(echo, 'echo entry missing')
   assert.equal(echo!.installed, true)
+  // Default response must NOT include models — keeps the lightweight
+  // call cheap and avoids spawning any model probes.
+  for (const a of r.agents) {
+    assert.equal(a.models, undefined, `${a.id} unexpectedly returned models without opt-in`)
+  }
+})
+
+test('GET /v1/agents?include=models → echo has empty models[], pi enumerates ModelRegistry', async () => {
+  const r = await json<{
+    agents: {
+      id: string
+      installed: boolean
+      models?: {
+        id: string
+        displayName?: string
+        provider?: string
+        available: boolean
+        contextWindow?: number
+      }[]
+      modelsError?: string
+    }[]
+  }>('GET', '/v1/agents?include=models')
+
+  const echo = r.agents.find((a) => a.id === 'echo')
+  assert.ok(echo, 'echo entry missing')
+  assert.deepEqual(echo!.models, [], 'echo should expose an empty model list')
+
+  const pi = r.agents.find((a) => a.id === 'pi')
+  assert.ok(pi, 'pi entry missing')
+  if (pi!.installed) {
+    assert.ok(Array.isArray(pi!.models), 'pi.models should be an array when installed')
+    assert.ok(pi!.models!.length > 0, 'pi should enumerate at least one built-in model')
+    const sample = pi!.models![0]!
+    // Canonical id format must round-trip through pi_sdk.ts setModel()
+    // (which splits on the first `:` into provider + model id).
+    assert.match(sample.id, /^[^:]+:.+/, `pi model id must be provider:id, got ${sample.id}`)
+    assert.equal(typeof sample.provider, 'string')
+    assert.equal(typeof sample.available, 'boolean')
+  } else {
+    // Not installed → models defaulted to [] (no probe attempted).
+    assert.deepEqual(pi!.models, [])
+  }
 })
 
 test('POST /v1/sessions rejects ~-prefix cwd → 400 invalid_cwd', async () => {

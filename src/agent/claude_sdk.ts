@@ -325,7 +325,7 @@ interface PendingPermission {
 // the glibc one (linux-${arch}-musl is tried first), which fails on
 // NixOS and other glibc-only distros. If the host has a working
 // `claude` on PATH, point the SDK at it via pathToClaudeCodeExecutable.
-function detectClaudeExecutable(): string | undefined {
+export function detectClaudeExecutable(): string | undefined {
   if (process.env.CLAUDE_CODE_EXECUTABLE) return process.env.CLAUDE_CODE_EXECUTABLE
   if (process.platform !== 'linux') return undefined
   const which = spawnSync('which', ['claude'], { encoding: 'utf8' })
