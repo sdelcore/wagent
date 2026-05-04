@@ -21,7 +21,7 @@ and events live in SQLite.
 │  Fastify HTTP routes                                        │
 │    GET    /v1/health[?deep=1]                               │
 │    GET    /v1/meta                                          │
-│    GET    /v1/agents                                        │
+│    GET    /v1/agents[?include=models]                      │
 │    GET    /v1/sessions[?destroyed=true&parentSessionId=…]   │
 │    POST   /v1/sessions                                      │
 │    GET    /v1/sessions/:id                                  │
