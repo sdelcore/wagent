@@ -294,13 +294,19 @@ const TOOL_DEFS = [
   {
     name: 'delegate_status',
     description:
-      'Check the status of a previously-spawned (background) child. Returns the current status and, if the child has completed, its final assistant message. Safe to call repeatedly.',
+      "Check the status of a previously-spawned (background) child. Returns the current status, the assistant text aggregated since `afterEventIndex` (or from the start if omitted), and a `lastEventIndex` cursor you can pass back on the next call to stream just the new output. While running, partial text is surfaced too so polls aren't blind. Safe to call repeatedly.",
     inputSchema: {
       type: 'object',
       properties: {
         childSessionId: {
           type: 'string',
           description: 'The childSessionId returned by an earlier delegate call.',
+        },
+        afterEventIndex: {
+          type: 'integer',
+          minimum: 0,
+          description:
+            'Optional cursor — only aggregate events with `event_index > afterEventIndex`. Pass back the `lastEventIndex` from the previous `delegate_status` response to stream incrementally instead of re-receiving the full transcript on every poll. Omit on the first call.',
         },
       },
       required: ['childSessionId'],
@@ -335,6 +341,7 @@ interface DelegateArgs {
 
 interface DelegateStatusArgs {
   childSessionId: string
+  afterEventIndex?: number
 }
 
 interface DelegateCancelArgs {
@@ -821,6 +828,11 @@ async function runDelegateStatus(
     return toolError('delegate_status: missing childSessionId')
   }
 
+  const startCursor =
+    typeof args.afterEventIndex === 'number' && Number.isFinite(args.afterEventIndex) && args.afterEventIndex >= 0
+      ? Math.floor(args.afterEventIndex)
+      : 0
+
   // Try the remote-children store first. If it's there, that's a
   // remote child and we proxy through; otherwise fall through to the
   // local lookup. (A local child is in sessionStore, never in
@@ -830,7 +842,7 @@ async function runDelegateStatus(
     if (remote.parentSessionId !== parentSessionId) {
       return toolError('delegate_status: child does not belong to this parent')
     }
-    return runDelegateStatusRemote(remote, app)
+    return runDelegateStatusRemote(remote, app, startCursor)
   }
 
   const child = deps.sessionStore.get(args.childSessionId)
@@ -846,13 +858,17 @@ async function runDelegateStatus(
       structuredContent: {
         status: 'destroyed',
         childSessionId: child.id,
+        lastEventIndex: startCursor,
       },
     }
   }
 
-  // Walk events: aggregate assistant text up to the first stop /
-  // subprocess_died. Page in chunks to handle large transcripts.
-  let cursor = 0
+  // Walk events: aggregate assistant text emitted *since* startCursor up
+  // to the first stop / subprocess_died. Page in chunks to handle large
+  // transcripts. lastEventIndex is what the caller passes back to stream
+  // incrementally on the next poll.
+  let cursor = startCursor
+  let lastEventIndex = startCursor
   let stopReason: string | null = null
   let aggregated = ''
   let dead = false
@@ -862,6 +878,7 @@ async function runDelegateStatus(
     if (page.length === 0) break
     for (const ev of page) {
       cursor = ev.eventIndex
+      lastEventIndex = ev.eventIndex
       const payload = ev.payload as SessionUpdate & { text?: string; reason?: string }
       if (payload.kind === 'agent_message_chunk' && typeof payload.text === 'string') {
         aggregated += payload.text
@@ -883,13 +900,13 @@ async function runDelegateStatus(
 
   const summary = aggregated.length > 0 ? aggregated : `(no assistant output yet)`
   return {
-    content: [
-      { type: 'text', text: status === 'running' ? `(child ${child.id} still running)` : summary },
-    ],
+    content: [{ type: 'text', text: summary }],
     structuredContent: {
       status,
       childSessionId: child.id,
       stopReason,
+      lastEventIndex,
+      partial: status === 'running' && aggregated.length > 0 ? aggregated : undefined,
       result: status === 'completed' ? aggregated : undefined,
     },
   }
@@ -954,15 +971,19 @@ interface TurnResult {
 async function runDelegateStatusRemote(
   remote: RemoteChild,
   app: FastifyInstance,
+  startCursor: number = 0,
 ): Promise<ToolResult> {
   const resolved = resolveRemote(remote.hostName, undefined)
   if ('error' in resolved) return toolError(resolved.error, { childSessionId: remote.childSessionId })
   const host = resolved.host
 
-  let events: Array<{ kind?: unknown; payload?: unknown }>
+  let events: Array<{ kind?: unknown; payload?: unknown; eventIndex?: unknown }>
   try {
+    const eventsUrl = startCursor > 0
+      ? `${host.url}/v1/sessions/${remote.childSessionId}/events?after=${startCursor}`
+      : `${host.url}/v1/sessions/${remote.childSessionId}/events`
     const resp = await fetch(
-      `${host.url}/v1/sessions/${remote.childSessionId}/events`,
+      eventsUrl,
       { method: 'GET', headers: remoteHeaders(host, { accept: 'application/json' }) },
     )
     if (resp.status === 404) {
@@ -1002,12 +1023,16 @@ async function runDelegateStatusRemote(
   let aggregated = ''
   let stopReason: string | null = null
   let dead = false
+  let lastEventIndex = startCursor
   for (const ev of events) {
     const kind = typeof ev.kind === 'string' ? ev.kind : ''
     const payloadRaw = ev.payload
     const payload = (payloadRaw && typeof payloadRaw === 'object' ? payloadRaw : ev) as {
       text?: unknown
       reason?: unknown
+    }
+    if (typeof ev.eventIndex === 'number' && Number.isFinite(ev.eventIndex)) {
+      lastEventIndex = ev.eventIndex
     }
     if (kind === 'agent_message_chunk' && typeof payload.text === 'string') {
       aggregated += payload.text
@@ -1038,17 +1063,14 @@ async function runDelegateStatusRemote(
 
   const summary = aggregated.length > 0 ? aggregated : `(no assistant output yet)`
   return {
-    content: [
-      {
-        type: 'text',
-        text: status === 'running' ? `(remote child ${remote.childSessionId} still running)` : summary,
-      },
-    ],
+    content: [{ type: 'text', text: summary }],
     structuredContent: {
       status,
       childSessionId: remote.childSessionId,
       host: remote.hostName,
       stopReason,
+      lastEventIndex,
+      partial: status === 'running' && aggregated.length > 0 ? aggregated : undefined,
       result: status === 'completed' ? aggregated : undefined,
     },
   }
