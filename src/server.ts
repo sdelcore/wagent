@@ -7,6 +7,7 @@ import { loadConfig } from './config.js'
 import { registerAuthHook } from './auth.js'
 import { openDatabase } from './db.js'
 import { SessionStore } from './sessions/store.js'
+import { RemoteChildrenStore } from './sessions/remote_children_store.js'
 import { EventStore } from './events/store.js'
 import { ProjectStore } from './projects/store.js'
 import { SessionBus } from './bus.js'
@@ -86,6 +87,7 @@ async function main() {
   })
 
   const sessionStore = new SessionStore(db)
+  const remoteChildren = new RemoteChildrenStore(db)
   const eventStore = new EventStore(db)
   const projectStore = new ProjectStore(db)
   const bus = new SessionBus()
@@ -118,6 +120,7 @@ async function main() {
   registerFsRoutes(app)
   registerDelegateMcpRoutes(app, {
     sessionStore,
+    remoteChildren,
     eventStore,
     bus,
     supervisor,

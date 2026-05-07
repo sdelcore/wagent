@@ -45,6 +45,22 @@ CREATE TABLE IF NOT EXISTS projects (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+
+-- Tracks children spawned on a *remote* wagent via
+-- delegate({ host: ... }). The remote owns the actual session and
+-- event log; this table is just enough to let delegate_status /
+-- delegate_cancel re-target the remote later. We deliberately do not
+-- persist URLs or auth tokens — host_name is re-resolved against
+-- ~/.config/wagent/hosts.toml on every call so token rotations and
+-- registry edits take effect immediately.
+CREATE TABLE IF NOT EXISTS remote_children (
+  child_session_id  TEXT PRIMARY KEY,
+  parent_session_id TEXT NOT NULL,
+  host_name         TEXT NOT NULL,
+  harness           TEXT NOT NULL,
+  created_at        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS remote_children_by_parent ON remote_children (parent_session_id);
 `
 
 export function openDatabase(path: string): DbHandle {
