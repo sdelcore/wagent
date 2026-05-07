@@ -12,6 +12,12 @@ import {
 } from '../types.js'
 import type { EventStore } from '../events/store.js'
 import type { SessionBus } from '../bus.js'
+import {
+  loadHostsConfig,
+  resolveHost,
+  knownHosts,
+  type ResolvedHost,
+} from '../cli/on-config.js'
 
 // Minimal MCP Streamable-HTTP server. Each parent session has one URL
 // (`/mcp/delegate/:parentSessionId`). The harness running inside that
@@ -227,7 +233,7 @@ const TOOL_DEFS = [
   {
     name: 'delegate',
     description:
-      "Spawn a wagent child session running the requested coding-agent harness and send it a single prompt. In sync mode (default) returns the child's final assistant message when it finishes. In background mode returns immediately with a childSessionId; use `delegate_status` to check on it later. Use this to hand off a focused subtask to another agent (possibly a different harness/model). The child runs in its own conversation context — pass anything it needs in `prompt` directly.",
+      "Spawn a wagent child session running the requested coding-agent harness and send it a single prompt. In sync mode (default) returns the child's final assistant message when it finishes. In background mode returns immediately with a childSessionId; use `delegate_status` to check on it later. Use this to hand off a focused subtask to another agent (possibly a different harness/model). The child runs in its own conversation context — pass anything it needs in `prompt` directly. To run the child on a different machine, set `host` to a name from `~/.config/wagent/hosts.toml` (e.g. 'nightman'); the child runs on that host's wagent and the result streams back. Remote hosts only support sync mode in this version.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -245,7 +251,12 @@ const TOOL_DEFS = [
         cwd: {
           type: 'string',
           description:
-            "Working directory for the child. Absolute path. Defaults to the parent's cwd.",
+            "Working directory for the child. Absolute path. Defaults to the parent's cwd (local) or the host's default_cwd from hosts.toml (remote).",
+        },
+        host: {
+          type: 'string',
+          description:
+            "Optional remote wagent host name (must match an entry in `~/.config/wagent/hosts.toml`). When set, the child runs on the named host's wagent instead of locally — use this to route work to a different machine (e.g. 'nightman' to act on home-infra). Omit (or use 'local') to run locally. Background mode is not supported with remote hosts; delegate_status / delegate_cancel can't see remote children either.",
         },
         model: {
           type: 'string',
@@ -313,6 +324,7 @@ interface DelegateArgs {
   harness: AgentKind
   prompt: string
   cwd?: string
+  host?: string
   model?: string
   mode?: DelegationMode
   options?: unknown
@@ -350,13 +362,28 @@ async function runDelegate(
   if (!args || typeof args !== 'object') {
     return toolError('delegate: missing arguments')
   }
-  const { harness, prompt, cwd: cwdArg, model, mode: modeArg, options: optionsArg } = args
+  const { harness, prompt, cwd: cwdArg, host: hostArg, model, mode: modeArg, options: optionsArg } = args
   if (typeof prompt !== 'string' || prompt.length === 0) {
     return toolError('delegate: prompt must be a non-empty string')
   }
   const mode: DelegationMode = modeArg === 'background' ? 'background' : 'sync'
   if (modeArg !== undefined && !VALID_MODES.includes(modeArg)) {
     return toolError(`delegate: mode must be one of ${VALID_MODES.join(', ')}`)
+  }
+
+  // `host` (when set and not "local") routes the child to a remote
+  // wagent. The remote dispatch path has no shared SessionStore with
+  // us, so it can't link parent↔child or be polled via delegate_status
+  // — sync only, fire-and-await.
+  const remoteHost =
+    typeof hostArg === 'string' && hostArg.length > 0 && hostArg !== 'local'
+      ? hostArg
+      : null
+  if (remoteHost) {
+    if (mode === 'background') {
+      return toolError('delegate: background mode is not supported with remote host')
+    }
+    return runDelegateRemote(remoteHost, harness, prompt, cwdArg, model, optionsArg, app)
   }
 
   // Pre-fetch parent for clean toolError UX on missing/destroyed parent
@@ -455,6 +482,236 @@ async function runDelegate(
       stopReason,
       result: text,
     },
+  }
+}
+
+// Dispatch the child session to a remote wagent named in
+// `~/.config/wagent/hosts.toml`. Mirrors the wire moves the
+// `wagent-on` CLI makes (POST /v1/sessions, POST /message, GET
+// /events/stream), aggregates the assistant text, and returns it as
+// a sync ToolResult. The remote child has no parent_session_id from
+// the remote wagent's perspective — it's a fresh root session there
+// — so neither delegate_status nor delegate_cancel can reach it.
+async function runDelegateRemote(
+  hostName: string,
+  harness: AgentKind,
+  prompt: string,
+  cwdArg: string | undefined,
+  model: string | undefined,
+  optionsArg: unknown,
+  app: FastifyInstance,
+): Promise<ToolResult> {
+  let host: ResolvedHost | null
+  try {
+    const config = loadHostsConfig()
+    host = resolveHost(config, hostName, cwdArg)
+    if (!host) {
+      const list = knownHosts(config)
+      return toolError(
+        `delegate: no host \`${hostName}\` in hosts.toml (known: ${list.length > 0 ? list.join(', ') : '(none)'})`,
+      )
+    }
+  } catch (err) {
+    return toolError(
+      `delegate: hosts.toml load failed: ${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
+  if (!host.cwd) {
+    return toolError(
+      `delegate: host \`${hostName}\` has no default_cwd and no \`cwd\` was given`,
+    )
+  }
+
+  // POST /v1/sessions on the remote.
+  const sessionBody: Record<string, unknown> = { agent: harness, cwd: host.cwd }
+  if (model) sessionBody.model = model
+  if (optionsArg !== undefined) sessionBody.options = optionsArg
+
+  const headers = (extra: Record<string, string> = {}) =>
+    host!.authToken
+      ? { authorization: `Bearer ${host!.authToken}`, ...extra }
+      : extra
+
+  let childSessionId: string
+  try {
+    const resp = await fetch(`${host.url}/v1/sessions`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify(sessionBody),
+    })
+    if (!resp.ok) {
+      const body = await safeReadText(resp)
+      return toolError(
+        `delegate: remote session create failed (${resp.status}): ${body}`,
+      )
+    }
+    const json = (await resp.json()) as { id?: unknown }
+    if (typeof json.id !== 'string' || json.id.length === 0) {
+      return toolError(
+        `delegate: remote session create returned no id: ${JSON.stringify(json).slice(0, 200)}`,
+      )
+    }
+    childSessionId = json.id
+  } catch (err) {
+    return toolError(
+      `delegate: connecting to ${host.url} failed: ${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
+
+  app.log.info(
+    { childId: childSessionId, host: hostName, url: host.url, harness },
+    'delegate: remote child session created',
+  )
+
+  // Subscribe BEFORE posting the prompt so we don't race past the
+  // first chunks. wagent's SSE supports `last-event-id: 0` to mean
+  // "from the start of this session," so even though we open the
+  // stream after the POST, we'd still get the full event log — but
+  // streaming from open is cleaner for memory + latency.
+  let streamResp: Response
+  try {
+    streamResp = await fetch(
+      `${host.url}/v1/sessions/${childSessionId}/events/stream`,
+      {
+        method: 'GET',
+        headers: headers({ accept: 'text/event-stream', 'last-event-id': '0' }),
+      },
+    )
+  } catch (err) {
+    return toolError(
+      `delegate: events stream connect failed: ${err instanceof Error ? err.message : String(err)}`,
+      { childSessionId },
+    )
+  }
+  if (!streamResp.ok || !streamResp.body) {
+    const body = streamResp.ok ? '<no body>' : await safeReadText(streamResp)
+    return toolError(
+      `delegate: events stream open failed (${streamResp.status}): ${body}`,
+      { childSessionId },
+    )
+  }
+
+  // Now post the prompt.
+  try {
+    const resp = await fetch(
+      `${host.url}/v1/sessions/${childSessionId}/message`,
+      {
+        method: 'POST',
+        headers: headers({ 'content-type': 'application/json' }),
+        body: JSON.stringify({ content: [{ type: 'text', text: prompt }] }),
+      },
+    )
+    if (!resp.ok) {
+      const body = await safeReadText(resp)
+      return toolError(
+        `delegate: remote message post failed (${resp.status}): ${body}`,
+        { childSessionId },
+      )
+    }
+  } catch (err) {
+    return toolError(
+      `delegate: posting prompt failed: ${err instanceof Error ? err.message : String(err)}`,
+      { childSessionId },
+    )
+  }
+
+  // Drain the SSE stream until terminal.
+  const result = await consumeRemoteStream(streamResp.body)
+  return {
+    content: [{ type: 'text', text: result.finalText.length > 0 ? result.finalText : `(remote child stopped: ${result.stopReason})` }],
+    isError: result.isError,
+    structuredContent: {
+      status: result.isError ? 'failed' : result.stopReason === 'end_turn' ? 'completed' : 'failed',
+      childSessionId,
+      host: hostName,
+      stopReason: result.stopReason,
+      result: result.finalText,
+    },
+  }
+}
+
+interface RemoteStreamResult {
+  finalText: string
+  stopReason: string
+  isError: boolean
+}
+
+async function consumeRemoteStream(
+  body: ReadableStream<Uint8Array>,
+): Promise<RemoteStreamResult> {
+  const reader = body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buf = ''
+  let finalText = ''
+  let stopReason = 'closed'
+  let isError = false
+
+  outer: while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    while (true) {
+      const idx = buf.indexOf('\n\n')
+      if (idx === -1) break
+      const rawEvent = buf.slice(0, idx)
+      buf = buf.slice(idx + 2)
+      const data = parseSseData(rawEvent)
+      if (data === null) continue
+      let envelope: Record<string, unknown>
+      try {
+        envelope = JSON.parse(data) as Record<string, unknown>
+      } catch {
+        continue
+      }
+      const kind = typeof envelope.kind === 'string' ? envelope.kind : ''
+      const payloadRaw = envelope.payload
+      const payload =
+        payloadRaw && typeof payloadRaw === 'object'
+          ? (payloadRaw as Record<string, unknown>)
+          : envelope
+      switch (kind) {
+        case 'agent_message_chunk': {
+          if (typeof payload.text === 'string') finalText += payload.text
+          break
+        }
+        case 'error': {
+          isError = true
+          const message =
+            typeof payload.message === 'string' ? payload.message : '(no message)'
+          finalText += `\n[error] ${message}`
+          stopReason = 'error'
+          break outer
+        }
+        case 'subprocess_died': {
+          isError = true
+          stopReason = 'subprocess_died'
+          break outer
+        }
+        case 'stop': {
+          stopReason = typeof payload.reason === 'string' ? payload.reason : 'end_turn'
+          break outer
+        }
+      }
+    }
+  }
+  return { finalText, stopReason, isError }
+}
+
+function parseSseData(rawEvent: string): string | null {
+  let data: string | null = null
+  for (const line of rawEvent.split('\n')) {
+    if (line.startsWith('data:')) {
+      data = line.slice('data:'.length).replace(/^\s/, '')
+    }
+  }
+  return data
+}
+
+async function safeReadText(resp: Response): Promise<string> {
+  try {
+    return (await resp.text()).slice(0, 4096)
+  } catch {
+    return '<no body>'
   }
 }
 
