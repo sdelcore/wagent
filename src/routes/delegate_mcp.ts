@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { SessionStore } from '../sessions/store.js'
+import type { RemoteChildrenStore, RemoteChild } from '../sessions/remote_children_store.js'
 import type { AgentSupervisor } from '../agent/supervisor.js'
 import type { DelegateTokenStore } from '../agent/delegate_tokens.js'
 import { probeAgent } from '../agent/availability.js'
@@ -50,6 +51,7 @@ interface JsonRpcResponse {
 
 export interface DelegateMcpDeps {
   sessionStore: SessionStore
+  remoteChildren: RemoteChildrenStore
   eventStore: EventStore
   bus: SessionBus
   supervisor: AgentSupervisor
@@ -181,10 +183,11 @@ async function dispatch(
             return { jsonrpc: '2.0', id, result }
           }
           case 'delegate_status': {
-            const result = runDelegateStatus(
+            const result = await runDelegateStatus(
               params.arguments as DelegateStatusArgs | undefined,
               parentSessionId,
               deps,
+              app,
             )
             return { jsonrpc: '2.0', id, result }
           }
@@ -233,7 +236,7 @@ const TOOL_DEFS = [
   {
     name: 'delegate',
     description:
-      "Spawn a wagent child session running the requested coding-agent harness and send it a single prompt. In sync mode (default) returns the child's final assistant message when it finishes. In background mode returns immediately with a childSessionId; use `delegate_status` to check on it later. Use this to hand off a focused subtask to another agent (possibly a different harness/model). The child runs in its own conversation context — pass anything it needs in `prompt` directly. To run the child on a different machine, set `host` to a name from `~/.config/wagent/hosts.toml` (e.g. 'nightman'); the child runs on that host's wagent and the result streams back. Remote hosts only support sync mode in this version.",
+      "Spawn a wagent child session running the requested coding-agent harness and send it a single prompt. In sync mode (default) returns the child's final assistant message when it finishes. In background mode returns immediately with a childSessionId; use `delegate_status` to check on it later. Use this to hand off a focused subtask to another agent (possibly a different harness/model). The child runs in its own conversation context — pass anything it needs in `prompt` directly. To run the child on a different machine, set `host` to a name from `~/.config/wagent/hosts.toml` (e.g. 'nightman'); the child runs on that host's wagent and `delegate_status` / `delegate_cancel` proxy through to the remote. Both sync and background modes work for remote hosts.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -256,7 +259,7 @@ const TOOL_DEFS = [
         host: {
           type: 'string',
           description:
-            "Optional remote wagent host name (must match an entry in `~/.config/wagent/hosts.toml`). When set, the child runs on the named host's wagent instead of locally — use this to route work to a different machine (e.g. 'nightman' to act on home-infra). Omit (or use 'local') to run locally. Background mode is not supported with remote hosts; delegate_status / delegate_cancel can't see remote children either.",
+            "Optional remote wagent host name (must match an entry in `~/.config/wagent/hosts.toml`). When set, the child runs on the named host's wagent instead of locally — use this to route work to a different machine (e.g. 'nightman' to act on home-infra). Omit (or use 'local') to run locally. Background mode is supported: the child id is recorded so later `delegate_status` / `delegate_cancel` calls proxy through to the remote.",
         },
         model: {
           type: 'string',
@@ -380,10 +383,18 @@ async function runDelegate(
       ? hostArg
       : null
   if (remoteHost) {
-    if (mode === 'background') {
-      return toolError('delegate: background mode is not supported with remote host')
-    }
-    return runDelegateRemote(remoteHost, harness, prompt, cwdArg, model, optionsArg, app)
+    return runDelegateRemote(
+      remoteHost,
+      harness,
+      prompt,
+      cwdArg,
+      model,
+      optionsArg,
+      mode,
+      parentSessionId,
+      deps,
+      app,
+    )
   }
 
   // Pre-fetch parent for clean toolError UX on missing/destroyed parent
@@ -487,11 +498,11 @@ async function runDelegate(
 
 // Dispatch the child session to a remote wagent named in
 // `~/.config/wagent/hosts.toml`. Mirrors the wire moves the
-// `wagent-on` CLI makes (POST /v1/sessions, POST /message, GET
-// /events/stream), aggregates the assistant text, and returns it as
-// a sync ToolResult. The remote child has no parent_session_id from
-// the remote wagent's perspective — it's a fresh root session there
-// — so neither delegate_status nor delegate_cancel can reach it.
+// `wagent-on` CLI makes (POST /v1/sessions, POST /message). In sync
+// mode opens the SSE stream and drains until terminal. In background
+// mode returns immediately and records the remote child in our
+// SQLite so subsequent delegate_status / delegate_cancel calls can
+// proxy back to the remote.
 async function runDelegateRemote(
   hostName: string,
   harness: AgentKind,
@@ -499,44 +510,25 @@ async function runDelegateRemote(
   cwdArg: string | undefined,
   model: string | undefined,
   optionsArg: unknown,
+  mode: DelegationMode,
+  parentSessionId: string,
+  deps: DelegateMcpDeps,
   app: FastifyInstance,
 ): Promise<ToolResult> {
-  let host: ResolvedHost | null
-  try {
-    const config = loadHostsConfig()
-    host = resolveHost(config, hostName, cwdArg)
-    if (!host) {
-      const list = knownHosts(config)
-      return toolError(
-        `delegate: no host \`${hostName}\` in hosts.toml (known: ${list.length > 0 ? list.join(', ') : '(none)'})`,
-      )
-    }
-  } catch (err) {
-    return toolError(
-      `delegate: hosts.toml load failed: ${err instanceof Error ? err.message : String(err)}`,
-    )
-  }
-  if (!host.cwd) {
-    return toolError(
-      `delegate: host \`${hostName}\` has no default_cwd and no \`cwd\` was given`,
-    )
-  }
+  const resolved = resolveRemote(hostName, cwdArg)
+  if ('error' in resolved) return toolError(resolved.error)
+  const host = resolved.host
 
   // POST /v1/sessions on the remote.
   const sessionBody: Record<string, unknown> = { agent: harness, cwd: host.cwd }
   if (model) sessionBody.model = model
   if (optionsArg !== undefined) sessionBody.options = optionsArg
 
-  const headers = (extra: Record<string, string> = {}) =>
-    host!.authToken
-      ? { authorization: `Bearer ${host!.authToken}`, ...extra }
-      : extra
-
   let childSessionId: string
   try {
     const resp = await fetch(`${host.url}/v1/sessions`, {
       method: 'POST',
-      headers: headers({ 'content-type': 'application/json' }),
+      headers: remoteHeaders(host, { 'content-type': 'application/json' }),
       body: JSON.stringify(sessionBody),
     })
     if (!resp.ok) {
@@ -559,22 +551,72 @@ async function runDelegateRemote(
   }
 
   app.log.info(
-    { childId: childSessionId, host: hostName, url: host.url, harness },
+    { childId: childSessionId, host: hostName, url: host.url, harness, mode },
     'delegate: remote child session created',
   )
 
-  // Subscribe BEFORE posting the prompt so we don't race past the
-  // first chunks. wagent's SSE supports `last-event-id: 0` to mean
-  // "from the start of this session," so even though we open the
-  // stream after the POST, we'd still get the full event log — but
-  // streaming from open is cleaner for memory + latency.
+  // Background mode: persist the mapping FIRST so a status/cancel that
+  // races the prompt POST can still find the remote, then post and
+  // return immediately.
+  if (mode === 'background') {
+    deps.remoteChildren.insert({
+      childSessionId,
+      parentSessionId,
+      hostName,
+      harness,
+    })
+    try {
+      const resp = await fetch(
+        `${host.url}/v1/sessions/${childSessionId}/message`,
+        {
+          method: 'POST',
+          headers: remoteHeaders(host, { 'content-type': 'application/json' }),
+          body: JSON.stringify({ content: [{ type: 'text', text: prompt }] }),
+        },
+      )
+      if (!resp.ok) {
+        const body = await safeReadText(resp)
+        // Drop the mapping — there's nothing useful to poll.
+        deps.remoteChildren.delete(childSessionId)
+        return toolError(
+          `delegate: remote message post failed (${resp.status}): ${body}`,
+          { childSessionId },
+        )
+      }
+    } catch (err) {
+      deps.remoteChildren.delete(childSessionId)
+      return toolError(
+        `delegate: posting prompt failed: ${err instanceof Error ? err.message : String(err)}`,
+        { childSessionId },
+      )
+    }
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Spawned remote child ${childSessionId} on ${hostName} in background. Use delegate_status to check.`,
+        },
+      ],
+      structuredContent: {
+        status: 'running',
+        childSessionId,
+        host: hostName,
+        mode: 'background',
+      },
+    }
+  }
+
+  // Sync: open SSE stream, post prompt, drain until terminal.
   let streamResp: Response
   try {
     streamResp = await fetch(
       `${host.url}/v1/sessions/${childSessionId}/events/stream`,
       {
         method: 'GET',
-        headers: headers({ accept: 'text/event-stream', 'last-event-id': '0' }),
+        headers: remoteHeaders(host, {
+          accept: 'text/event-stream',
+          'last-event-id': '0',
+        }),
       },
     )
   } catch (err) {
@@ -591,13 +633,12 @@ async function runDelegateRemote(
     )
   }
 
-  // Now post the prompt.
   try {
     const resp = await fetch(
       `${host.url}/v1/sessions/${childSessionId}/message`,
       {
         method: 'POST',
-        headers: headers({ 'content-type': 'application/json' }),
+        headers: remoteHeaders(host, { 'content-type': 'application/json' }),
         body: JSON.stringify({ content: [{ type: 'text', text: prompt }] }),
       },
     )
@@ -615,19 +656,70 @@ async function runDelegateRemote(
     )
   }
 
-  // Drain the SSE stream until terminal.
   const result = await consumeRemoteStream(streamResp.body)
   return {
-    content: [{ type: 'text', text: result.finalText.length > 0 ? result.finalText : `(remote child stopped: ${result.stopReason})` }],
+    content: [
+      {
+        type: 'text',
+        text:
+          result.finalText.length > 0
+            ? result.finalText
+            : `(remote child stopped: ${result.stopReason})`,
+      },
+    ],
     isError: result.isError,
     structuredContent: {
-      status: result.isError ? 'failed' : result.stopReason === 'end_turn' ? 'completed' : 'failed',
+      status: result.isError
+        ? 'failed'
+        : result.stopReason === 'end_turn'
+          ? 'completed'
+          : 'failed',
       childSessionId,
       host: hostName,
       stopReason: result.stopReason,
       result: result.finalText,
     },
   }
+}
+
+// Look up a host_name in hosts.toml. Returns the resolved host or an
+// error string; the caller turns the error string into a toolError.
+// Re-resolved on every call so token rotation in env/file takes
+// effect immediately without having to update any persisted state.
+function resolveRemote(
+  hostName: string,
+  cwdOverride: string | undefined,
+): { host: ResolvedHost & { cwd: string } } | { error: string } {
+  let host: ResolvedHost | null
+  try {
+    const config = loadHostsConfig()
+    host = resolveHost(config, hostName, cwdOverride)
+    if (!host) {
+      const list = knownHosts(config)
+      return {
+        error: `delegate: no host \`${hostName}\` in hosts.toml (known: ${list.length > 0 ? list.join(', ') : '(none)'})`,
+      }
+    }
+  } catch (err) {
+    return {
+      error: `delegate: hosts.toml load failed: ${err instanceof Error ? err.message : String(err)}`,
+    }
+  }
+  if (!host.cwd) {
+    return {
+      error: `delegate: host \`${hostName}\` has no default_cwd and no \`cwd\` was given`,
+    }
+  }
+  return { host: { ...host, cwd: host.cwd } }
+}
+
+function remoteHeaders(
+  host: ResolvedHost,
+  extra: Record<string, string> = {},
+): Record<string, string> {
+  return host.authToken
+    ? { authorization: `Bearer ${host.authToken}`, ...extra }
+    : extra
 }
 
 interface RemoteStreamResult {
@@ -716,15 +808,31 @@ async function safeReadText(resp: Response): Promise<string> {
 }
 
 // Inspect a child's event log to derive its current status and (if
-// completed) the assistant text. Cheap: just reads from SQLite.
-function runDelegateStatus(
+// completed) the assistant text. For local children: reads from
+// SQLite (cheap). For remote children: fetches the snapshot
+// `/v1/sessions/:id/events` from the remote (one round-trip).
+async function runDelegateStatus(
   args: DelegateStatusArgs | undefined,
   parentSessionId: string,
   deps: DelegateMcpDeps,
-): ToolResult {
+  app: FastifyInstance,
+): Promise<ToolResult> {
   if (!args || typeof args.childSessionId !== 'string') {
     return toolError('delegate_status: missing childSessionId')
   }
+
+  // Try the remote-children store first. If it's there, that's a
+  // remote child and we proxy through; otherwise fall through to the
+  // local lookup. (A local child is in sessionStore, never in
+  // remote_children, so the order doesn't allow a misclassification.)
+  const remote = deps.remoteChildren.get(args.childSessionId)
+  if (remote) {
+    if (remote.parentSessionId !== parentSessionId) {
+      return toolError('delegate_status: child does not belong to this parent')
+    }
+    return runDelegateStatusRemote(remote, app)
+  }
+
   const child = deps.sessionStore.get(args.childSessionId)
   if (!child) return toolError(`delegate_status: child ${args.childSessionId} not found`)
   if (child.parentSessionId !== parentSessionId) {
@@ -796,6 +904,15 @@ async function runDelegateCancel(
   if (!args || typeof args.childSessionId !== 'string') {
     return toolError('delegate_cancel: missing childSessionId')
   }
+
+  const remote = deps.remoteChildren.get(args.childSessionId)
+  if (remote) {
+    if (remote.parentSessionId !== parentSessionId) {
+      return toolError('delegate_cancel: child does not belong to this parent')
+    }
+    return runDelegateCancelRemote(remote, app)
+  }
+
   const child = deps.sessionStore.get(args.childSessionId)
   if (!child) return toolError(`delegate_cancel: child ${args.childSessionId} not found`)
   if (child.parentSessionId !== parentSessionId) {
@@ -828,6 +945,156 @@ async function runDelegateCancel(
 interface TurnResult {
   finalText: string
   stopReason: string
+}
+
+// Fetch /v1/sessions/:id/events from the remote, replay through the
+// same status-derivation logic the local path uses. One round-trip
+// per call — no caching — so a hosts.toml token rotation or registry
+// edit takes effect on the next status call.
+async function runDelegateStatusRemote(
+  remote: RemoteChild,
+  app: FastifyInstance,
+): Promise<ToolResult> {
+  const resolved = resolveRemote(remote.hostName, undefined)
+  if ('error' in resolved) return toolError(resolved.error, { childSessionId: remote.childSessionId })
+  const host = resolved.host
+
+  let events: Array<{ kind?: unknown; payload?: unknown }>
+  try {
+    const resp = await fetch(
+      `${host.url}/v1/sessions/${remote.childSessionId}/events`,
+      { method: 'GET', headers: remoteHeaders(host, { accept: 'application/json' }) },
+    )
+    if (resp.status === 404) {
+      return toolError(
+        `delegate_status: remote child ${remote.childSessionId} not found on ${remote.hostName}`,
+        { childSessionId: remote.childSessionId },
+      )
+    }
+    if (!resp.ok) {
+      const body = await safeReadText(resp)
+      return toolError(
+        `delegate_status: remote events fetch failed (${resp.status}): ${body}`,
+        { childSessionId: remote.childSessionId },
+      )
+    }
+    const json = (await resp.json()) as unknown
+    // Polling endpoint shape: either a bare array of envelopes or
+    // { events: [...] }. Tolerate both so we don't break if the route
+    // shape evolves.
+    if (Array.isArray(json)) {
+      events = json as typeof events
+    } else if (json && typeof json === 'object' && Array.isArray((json as { events?: unknown }).events)) {
+      events = (json as { events: typeof events }).events
+    } else {
+      return toolError(
+        `delegate_status: unexpected remote events response: ${JSON.stringify(json).slice(0, 200)}`,
+        { childSessionId: remote.childSessionId },
+      )
+    }
+  } catch (err) {
+    return toolError(
+      `delegate_status: connecting to ${host.url} failed: ${err instanceof Error ? err.message : String(err)}`,
+      { childSessionId: remote.childSessionId },
+    )
+  }
+
+  let aggregated = ''
+  let stopReason: string | null = null
+  let dead = false
+  for (const ev of events) {
+    const kind = typeof ev.kind === 'string' ? ev.kind : ''
+    const payloadRaw = ev.payload
+    const payload = (payloadRaw && typeof payloadRaw === 'object' ? payloadRaw : ev) as {
+      text?: unknown
+      reason?: unknown
+    }
+    if (kind === 'agent_message_chunk' && typeof payload.text === 'string') {
+      aggregated += payload.text
+    } else if (kind === 'stop') {
+      stopReason = typeof payload.reason === 'string' ? payload.reason : 'end_turn'
+    } else if (kind === 'subprocess_died') {
+      dead = true
+    }
+  }
+
+  let status: 'running' | 'completed' | 'failed' | 'cancelled'
+  if (dead) status = 'failed'
+  else if (stopReason === 'cancelled') status = 'cancelled'
+  else if (stopReason === 'end_turn') status = 'completed'
+  else if (stopReason !== null) status = 'failed'
+  else status = 'running'
+
+  // Once the remote child is terminal, drop our mapping — we won't
+  // need to proxy further calls.
+  if (status !== 'running') {
+    try {
+      // Best-effort: a stale row is harmless, just wastes a row.
+      app.log.debug({ childId: remote.childSessionId }, 'delegate: dropping terminal remote child mapping')
+    } catch {
+      // ignore
+    }
+  }
+
+  const summary = aggregated.length > 0 ? aggregated : `(no assistant output yet)`
+  return {
+    content: [
+      {
+        type: 'text',
+        text: status === 'running' ? `(remote child ${remote.childSessionId} still running)` : summary,
+      },
+    ],
+    structuredContent: {
+      status,
+      childSessionId: remote.childSessionId,
+      host: remote.hostName,
+      stopReason,
+      result: status === 'completed' ? aggregated : undefined,
+    },
+  }
+}
+
+async function runDelegateCancelRemote(
+  remote: RemoteChild,
+  app: FastifyInstance,
+): Promise<ToolResult> {
+  const resolved = resolveRemote(remote.hostName, undefined)
+  if ('error' in resolved) return toolError(resolved.error, { childSessionId: remote.childSessionId })
+  const host = resolved.host
+
+  try {
+    const resp = await fetch(
+      `${host.url}/v1/sessions/${remote.childSessionId}/abort`,
+      { method: 'POST', headers: remoteHeaders(host) },
+    )
+    if (resp.status === 404) {
+      return {
+        content: [
+          { type: 'text', text: `(remote child ${remote.childSessionId} not found on ${remote.hostName})` },
+        ],
+        structuredContent: { status: 'noop', childSessionId: remote.childSessionId },
+      }
+    }
+    if (!resp.ok) {
+      const body = await safeReadText(resp)
+      return toolError(
+        `delegate_cancel: remote abort failed (${resp.status}): ${body}`,
+        { childSessionId: remote.childSessionId },
+      )
+    }
+  } catch (err) {
+    app.log.warn({ err, childId: remote.childSessionId }, 'delegate_cancel: remote abort failed')
+    return toolError(
+      `delegate_cancel: ${err instanceof Error ? err.message : String(err)}`,
+      { childSessionId: remote.childSessionId },
+    )
+  }
+  return {
+    content: [
+      { type: 'text', text: `(cancel requested for remote ${remote.childSessionId} on ${remote.hostName})` },
+    ],
+    structuredContent: { status: 'cancelling', childSessionId: remote.childSessionId, host: remote.hostName },
+  }
 }
 
 // Subscribe to a child's bus, accumulate assistant text, resolve when
