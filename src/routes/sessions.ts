@@ -66,6 +66,7 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionsDeps) 
       cwd?: string
       alias?: string | null
       model?: string | null
+      mode?: string | null
       parentSessionId?: string | null
       parentToolCallId?: string | null
       delegationMode?: string | null
@@ -84,6 +85,7 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionsDeps) 
         cwd: body.cwd,
         alias: body.alias,
         model: body.model,
+        mode: body.mode,
         options: body.options,
         parentSessionId: body.parentSessionId,
         parentToolCallId: body.parentToolCallId,
@@ -249,7 +251,7 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionsDeps) 
 
   app.patch<{
     Params: { id: string }
-    Body: { alias?: string | null; model?: string | null }
+    Body: { alias?: string | null; model?: string | null; mode?: string | null }
   }>('/v1/sessions/:id', async (req, reply) => {
     const body = req.body ?? {}
     const before = store.get(req.params.id)
@@ -258,6 +260,7 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionsDeps) 
     const updated = store.update(req.params.id, {
       alias: body.alias === undefined ? undefined : body.alias,
       model: body.model === undefined ? undefined : body.model,
+      mode: body.mode === undefined ? undefined : body.mode,
     })
     if (!updated) return bad(reply, 404, 'not_found', `session ${req.params.id} not found`)
 

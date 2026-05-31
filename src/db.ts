@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   cwd TEXT NOT NULL,
   alias TEXT,
   model TEXT,
+  mode TEXT,
+  status TEXT NOT NULL DEFAULT 'idle',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   destroyed_at INTEGER,
@@ -84,6 +86,8 @@ export function openDatabase(path: string): DbHandle {
     `ALTER TABLE sessions ADD COLUMN delegation_depth INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE sessions ADD COLUMN delegation_mode TEXT`,
     `ALTER TABLE sessions ADD COLUMN options_json TEXT`,
+    `ALTER TABLE sessions ADD COLUMN mode TEXT`,
+    `ALTER TABLE sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'idle'`,
   ]) {
     try {
       raw.exec(stmt)
@@ -92,6 +96,10 @@ export function openDatabase(path: string): DbHandle {
       if (!/duplicate column name/i.test(msg)) throw err
     }
   }
+  // Backfill: pre-status rows added by the ALTER above get the default
+  // 'idle' status. Anything already destroyed should reflect that on
+  // its status column so list views don't lie until the next event.
+  raw.exec(`UPDATE sessions SET status = 'destroyed' WHERE destroyed_at IS NOT NULL AND status != 'destroyed'`)
   raw.exec(`CREATE INDEX IF NOT EXISTS sessions_by_parent ON sessions (parent_session_id)`)
   return {
     raw,

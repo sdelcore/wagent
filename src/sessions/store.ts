@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import type { DbHandle } from '../db.js'
-import type { AgentKind, DelegationMode, Session, SessionOptions } from '../types.js'
+import type {
+  AgentKind,
+  DelegationMode,
+  Session,
+  SessionOptions,
+  SessionStatus,
+} from '../types.js'
 
 interface SessionRow {
   id: string
@@ -8,6 +14,8 @@ interface SessionRow {
   cwd: string
   alias: string | null
   model: string | null
+  mode: string | null
+  status: string
   created_at: number
   updated_at: number
   destroyed_at: number | null
@@ -36,6 +44,8 @@ function rowToSession(row: SessionRow): Session {
     cwd: row.cwd,
     alias: row.alias,
     model: row.model,
+    mode: row.mode,
+    status: row.status as SessionStatus,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     destroyedAt: row.destroyed_at,
@@ -52,6 +62,7 @@ export interface CreateSessionInput {
   cwd: string
   alias?: string | null
   model?: string | null
+  mode?: string | null
   parentSessionId?: string | null
   parentToolCallId?: string | null
   delegationDepth?: number
@@ -69,10 +80,10 @@ export class SessionStore {
     this.db.raw
       .prepare(
         `INSERT INTO sessions (
-           id, agent, cwd, alias, model, created_at, updated_at,
+           id, agent, cwd, alias, model, mode, status, created_at, updated_at,
            parent_session_id, parent_tool_call_id, delegation_depth, delegation_mode,
            options_json
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, 'idle', ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -80,6 +91,7 @@ export class SessionStore {
         input.cwd,
         input.alias ?? null,
         input.model ?? null,
+        input.mode ?? null,
         now,
         now,
         input.parentSessionId ?? null,
@@ -94,6 +106,8 @@ export class SessionStore {
       cwd: input.cwd,
       alias: input.alias ?? null,
       model: input.model ?? null,
+      mode: input.mode ?? null,
+      status: 'idle',
       createdAt: now,
       updatedAt: now,
       destroyedAt: null,
@@ -146,23 +160,38 @@ export class SessionStore {
     return out
   }
 
-  update(id: string, patch: { alias?: string | null; model?: string | null }): Session | null {
+  update(
+    id: string,
+    patch: { alias?: string | null; model?: string | null; mode?: string | null },
+  ): Session | null {
     const existing = this.get(id)
     if (!existing) return null
     const now = Date.now()
     this.db.raw
       .prepare(
         `UPDATE sessions
-         SET alias = ?, model = ?, updated_at = ?
+         SET alias = ?, model = ?, mode = ?, updated_at = ?
          WHERE id = ?`,
       )
       .run(
         patch.alias !== undefined ? patch.alias : existing.alias,
         patch.model !== undefined ? patch.model : existing.model,
+        patch.mode !== undefined ? patch.mode : existing.mode,
         now,
         id,
       )
     return this.get(id)
+  }
+
+  // Idempotent status update; no-op when status already matches. Called
+  // from every site that appends an event so list views reflect lifecycle
+  // without subscribing to SSE. Does not touch updated_at — that field
+  // tracks user-visible patches (alias / model / mode), not chatter from
+  // the agent.
+  applyStatus(id: string, next: SessionStatus): void {
+    this.db.raw
+      .prepare(`UPDATE sessions SET status = ? WHERE id = ? AND status != ?`)
+      .run(next, id, next)
   }
 
   // Hard delete — FK on events cascades, FK on parent_session_id cascades to children.
