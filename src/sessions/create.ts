@@ -21,6 +21,7 @@ export interface CreateSessionInput {
   cwd: unknown
   alias?: unknown
   model?: unknown
+  mode?: unknown
   options?: unknown
   parentSessionId?: unknown
   parentToolCallId?: unknown
@@ -66,6 +67,7 @@ export async function createSession(
 
   const alias = typeof input.alias === 'string' ? input.alias : null
   const model = typeof input.model === 'string' ? input.model : null
+  const mode = typeof input.mode === 'string' ? input.mode : null
 
   let parentSessionId: string | null = null
   let parentToolCallId: string | null = null
@@ -131,6 +133,7 @@ export async function createSession(
     cwd,
     alias,
     model,
+    mode,
     parentSessionId,
     parentToolCallId,
     delegationDepth,

@@ -636,6 +636,62 @@ test('sessions: create / list / get / patch / delete', async () => {
   assert.equal(after.status, 404)
 })
 
+test('sessions: status defaults to idle on create; mode persists round-trip', async () => {
+  const created = await json<Session>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    mode: 'plan',
+  })
+  assert.equal(created.status, 'idle')
+  assert.equal(created.mode, 'plan')
+
+  const got = await json<Session>('GET', `/v1/sessions/${created.id}`)
+  assert.equal(got.status, 'idle')
+  assert.equal(got.mode, 'plan')
+
+  // PATCH mode to a different value
+  const patched = await json<Session>('PATCH', `/v1/sessions/${created.id}`, {
+    mode: 'shell',
+  })
+  assert.equal(patched.mode, 'shell')
+
+  // PATCH mode → null clears it
+  const cleared = await json<Session>('PATCH', `/v1/sessions/${created.id}`, {
+    mode: null,
+  })
+  assert.equal(cleared.mode, null)
+
+  await api('DELETE', `/v1/sessions/${created.id}`)
+})
+
+test('sessions: status flips running → idle across a turn', async () => {
+  const session = await json<Session>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+  })
+  assert.equal(session.status, 'idle')
+
+  // Drive a turn; before reading status back we wait for the stop event so
+  // the supervisor's emit hook has flipped status back to 'idle'.
+  const events: SseEvent[] = []
+  const sseDone = streamUntil(
+    `${BASE}/v1/sessions/${session.id}/events/stream`,
+    (e) => events.push(e),
+    (e) => e.data.kind === 'stop',
+    { timeoutMs: 10_000 },
+  )
+  await sleep(150)
+  await api('POST', `/v1/sessions/${session.id}/message`, {
+    content: [{ type: 'text', text: 'hello' }],
+  })
+  await sseDone
+
+  const final = await json<Session>('GET', `/v1/sessions/${session.id}`)
+  assert.equal(final.status, 'idle', `expected idle after stop, got ${final.status}`)
+
+  await api('DELETE', `/v1/sessions/${session.id}`)
+})
+
 test('echo: full session lifecycle, monotonic events, stop end_turn', async () => {
   const session = await json<Session>('POST', '/v1/sessions', {
     agent: 'echo',

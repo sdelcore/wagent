@@ -65,6 +65,11 @@ export function registerPromptRoutes(app: FastifyInstance, deps: PromptDeps) {
       return bad(reply, 500, 'spawn_failed', message)
     }
 
+    // Flip the session to 'running' immediately so concurrent list
+    // readers see the in-flight turn before the first SSE event lands.
+    // The supervisor's emit hook will keep status in sync from here on.
+    deps.sessionStore.applyStatus(req.params.id, 'running')
+
     // Fire and forget — events stream over SSE. HTTP returns 202 once
     // the prompt has been queued/sent to the agent.
     process.prompt(content).catch((err) => {

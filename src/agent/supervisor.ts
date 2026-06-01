@@ -4,6 +4,7 @@ import type { EventStore } from '../events/store.js'
 import type { SessionStore } from '../sessions/store.js'
 import type { SessionBus } from '../bus.js'
 import type { AgentKind } from '../types.js'
+import { statusFromEvent } from '../types.js'
 import type { DelegateTokenStore } from './delegate_tokens.js'
 
 export interface SupervisorDeps {
@@ -58,6 +59,8 @@ export class AgentSupervisor {
         emit: (update) => {
           // Persist first so SSE replay can find it, then publish live.
           const event = this.deps.eventStore.append(sessionId, update)
+          const nextStatus = statusFromEvent(event.kind)
+          if (nextStatus) this.deps.sessionStore.applyStatus(sessionId, nextStatus)
           this.deps.bus.publish(event)
         },
         markDead: (reason) => {
@@ -70,6 +73,7 @@ export class AgentSupervisor {
             kind: 'subprocess_died',
             reason,
           })
+          this.deps.sessionStore.applyStatus(sessionId, 'error')
           this.deps.bus.publish(event)
           this.deps.log.warn({ sessionId, reason }, 'agent subprocess died unexpectedly')
         },

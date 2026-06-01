@@ -174,6 +174,8 @@ async function runDeepProbe(log: FastifyBaseLogger): Promise<DeepProbeResult> {
     cwd: '/',
     alias: null,
     model: null,
+    mode: null,
+    status: 'idle',
     createdAt: start,
     updatedAt: start,
     destroyedAt: null,

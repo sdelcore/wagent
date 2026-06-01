@@ -158,19 +158,39 @@ only ever see wagent's wire types.
 
 ## Session lifecycle
 
-1. Client `POST /v1/sessions { agent, cwd, model?, options? }`.
-2. wagent allocates an id, persists a row, returns it.
+1. Client `POST /v1/sessions { agent, cwd, model?, mode?, options? }`.
+2. wagent allocates an id, persists a row (`status: 'idle'`), returns it.
 3. Client `POST /v1/sessions/:id/message`. Supervisor lazily spawns
    the underlying harness on first prompt and subscribes to its
    events. The persisted `options` are forwarded into the harness at
-   spawn time — see "Per-session options" below.
+   spawn time — see "Per-session options" below. The route flips
+   `status` to `'running'` synchronously before returning 202.
 4. Harness emits events → normalizer → SQLite append + broadcast →
-   SSE consumers see them live.
+   SSE consumers see them live. Each event also runs through
+   `statusFromEvent()` so the row's `status` reflects lifecycle without
+   clients having to subscribe (e.g. `permission_request` →
+   `'needs_input'`, `stop` → `'idle'`, `subprocess_died` → `'error'`).
 5. Client disconnects: harness **stays alive**. SQLite keeps the event
    log. New connection picks up via `Last-Event-ID`.
 6. `POST /v1/sessions/:id/abort` interrupts the current turn.
 7. `DELETE /v1/sessions/:id` ends and removes the session
    (FK-cascades events; cascade-destroys delegation descendants).
+
+### `Session.status` values
+
+| value         | meaning                                                       |
+|---------------|---------------------------------------------------------------|
+| `idle`        | alive, no in-flight turn (fresh session or last event = stop) |
+| `running`     | a turn is in flight (agent/tool events landing)               |
+| `needs_input` | open `permission_request` awaiting a response                 |
+| `error`       | subprocess died unexpectedly                                  |
+| `destroyed`   | `destroyed_at` is set (transient — row is removed on DELETE)  |
+
+### `Session.mode`
+
+Free-form string (`null` by default). Set on POST / PATCH. Adapters
+ignore it — wagent does not interpret modes. Clients use it as a UX
+label (common conventions: `'edit'`, `'shell'`, `'plan'`, `'build'`).
 
 ## Per-session options
 

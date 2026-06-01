@@ -106,12 +106,30 @@ export interface SessionOptions {
   forkSession?: boolean
 }
 
+// Coarse lifecycle state surfaced on Session so list views can colour
+// rows without subscribing to SSE. Maintained by the event pipeline:
+//   - any agent/tool/user/plan event → 'running'
+//   - permission_request                → 'needs_input'
+//   - permission_resolved               → 'running'
+//   - stop                              → 'idle'
+//   - subprocess_died                   → 'error'
+//   - session_destroyed                 → 'destroyed'
+// `error` and `usage_update` are informational and don't transition.
+// A fresh session starts 'idle'; sessions with destroyed_at NOT NULL
+// are always 'destroyed' regardless of the last event.
+export type SessionStatus = 'idle' | 'running' | 'needs_input' | 'error' | 'destroyed'
+
 export interface Session {
   id: string
   agent: AgentKind
   cwd: string
   alias: string | null
   model: string | null
+  // Free-form UX label set by clients on create / PATCH. Adapters
+  // ignore it — wagent does not interpret modes. Common values like
+  // 'edit', 'shell', 'plan', 'build' are conventions, not enforced.
+  mode: string | null
+  status: SessionStatus
   createdAt: number
   updatedAt: number
   destroyedAt: number | null
@@ -218,5 +236,34 @@ export interface ApiError {
     code: string
     message: string
     details?: unknown
+  }
+}
+
+// Translates an event kind into the session status it should imply.
+// Returns null when the event is informational (`error`, `usage_update`)
+// and should not transition state. Every callsite that appends an event
+// also calls SessionStore.applyStatus with the result of this lookup
+// (when non-null), so status stays in sync with the event log.
+export function statusFromEvent(kind: SessionUpdateKind): SessionStatus | null {
+  switch (kind) {
+    case 'session_destroyed':
+      return 'destroyed'
+    case 'subprocess_died':
+      return 'error'
+    case 'stop':
+      return 'idle'
+    case 'permission_request':
+      return 'needs_input'
+    case 'permission_resolved':
+    case 'agent_message_chunk':
+    case 'agent_thought_chunk':
+    case 'tool_call':
+    case 'tool_call_update':
+    case 'plan':
+    case 'user_message_chunk':
+      return 'running'
+    case 'error':
+    case 'usage_update':
+      return null
   }
 }
