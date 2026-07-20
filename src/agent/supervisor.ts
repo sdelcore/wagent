@@ -1,9 +1,10 @@
+import { randomUUID } from 'node:crypto'
 import type { FastifyBaseLogger } from 'fastify'
 import type { AgentFactory, AgentProcess } from './process.js'
 import type { EventStore } from '../events/store.js'
 import type { SessionStore } from '../sessions/store.js'
 import type { SessionBus } from '../bus.js'
-import type { AgentKind } from '../types.js'
+import type { AgentKind, ContentBlock } from '../types.js'
 import { statusFromEvent } from '../types.js'
 import type { DelegateTokenStore } from './delegate_tokens.js'
 
@@ -19,13 +20,57 @@ export interface SupervisorDeps {
   delegateBaseUrl: string
 }
 
+export type AbortResult =
+  | { status: 'aborted'; turnId: string }
+  | { status: 'no_active_turn' }
+  | { status: 'turn_not_current' }
+
 // Owns the live AgentProcess for each session. Callers ask for a process
-// by sessionId; supervisor lazily spawns one if none exists.
+// by sessionId; supervisor lazily spawns one if none exists. Also owns
+// turn identity: every prompt gets a turnId, and aborts are gated
+// against the current turn so a stale abort can never cancel the turn
+// that replaced its target (issue #36's "abort ricochet").
 export class AgentSupervisor {
   private readonly processes = new Map<string, AgentProcess>()
   private readonly spawning = new Map<string, Promise<AgentProcess>>()
+  private readonly currentTurns = new Map<string, string>()
 
   constructor(private readonly deps: SupervisorDeps) {}
+
+  // Submit a prompt as a new turn. Returns the minted turnId once the
+  // prompt is handed to the adapter; the turn itself runs fire-and-forget
+  // and its events stream over the bus.
+  async prompt(sessionId: string, content: ContentBlock[]): Promise<{ turnId: string }> {
+    const proc = await this.ensure(sessionId)
+    const turnId = randomUUID()
+    this.currentTurns.set(sessionId, turnId)
+    // Flip to 'running' immediately so concurrent list readers see the
+    // in-flight turn before the first event lands; the emit hook keeps
+    // status in sync from here on.
+    this.deps.sessionStore.applyStatus(sessionId, 'running')
+    proc.prompt(turnId, content).catch((err) => {
+      this.deps.log.error({ err, sessionId, turnId }, 'prompt failed')
+      if (this.currentTurns.get(sessionId) === turnId) this.currentTurns.delete(sessionId)
+    })
+    return { turnId }
+  }
+
+  // Abort the in-flight turn. With a turnId, only that turn is targeted —
+  // aborting a turn that already ended or was superseded is a no-op, so
+  // clients can steer without racing the turn they're about to start.
+  // Without a turnId, aborts whatever turn is currently in flight.
+  async abort(sessionId: string, turnId?: string): Promise<AbortResult> {
+    const proc = this.processes.get(sessionId)
+    const current = this.currentTurns.get(sessionId)
+    if (!proc || current === undefined) return { status: 'no_active_turn' }
+    if (turnId !== undefined && turnId !== current) return { status: 'turn_not_current' }
+    try {
+      await proc.cancel(current)
+    } catch (err) {
+      this.deps.log.warn({ err, sessionId, turnId: current }, 'abort failed')
+    }
+    return { status: 'aborted', turnId: current }
+  }
 
   // Get an already-running process, or spawn one if needed.
   async ensure(sessionId: string): Promise<AgentProcess> {
@@ -57,9 +102,23 @@ export class AgentSupervisor {
         log: this.deps.log.child({ sessionId, agent: session.agent }),
         delegate,
         emit: (update) => {
+          const current = this.currentTurns.get(sessionId)
+          // Adapters stamp the boundary events themselves; back-fill
+          // everything else with the current turn so mid-turn events
+          // (chunks, tool calls, permissions) are attributable.
+          const stamped =
+            update.turnId !== undefined || current === undefined
+              ? update
+              : { ...update, turnId: current }
+          // A stop for a turn that is no longer current (superseded, or
+          // the process already died) still terminates its turn on the
+          // wire, but must not flip session status — a newer turn may be
+          // live, or the session is in 'error' after subprocess_died.
+          const staleStop = stamped.kind === 'stop' && stamped.turnId !== current
+          if (stamped.kind === 'stop' && !staleStop) this.currentTurns.delete(sessionId)
           // Persist first so SSE replay can find it, then publish live.
-          const event = this.deps.eventStore.append(sessionId, update)
-          const nextStatus = statusFromEvent(event.kind)
+          const event = this.deps.eventStore.append(sessionId, stamped)
+          const nextStatus = staleStop ? null : statusFromEvent(event.kind)
           if (nextStatus) this.deps.sessionStore.applyStatus(sessionId, nextStatus)
           this.deps.bus.publish(event)
         },
@@ -69,9 +128,12 @@ export class AgentSupervisor {
           // "agent crashed, send a prompt to restart" affordance.
           this.processes.delete(sessionId)
           this.deps.delegateTokens.revoke(sessionId)
+          const current = this.currentTurns.get(sessionId)
+          this.currentTurns.delete(sessionId)
           const event = this.deps.eventStore.append(sessionId, {
             kind: 'subprocess_died',
             reason,
+            ...(current !== undefined ? { turnId: current } : {}),
           })
           this.deps.sessionStore.applyStatus(sessionId, 'error')
           this.deps.bus.publish(event)
@@ -97,6 +159,7 @@ export class AgentSupervisor {
   async closeOne(sessionId: string): Promise<void> {
     const proc = this.processes.get(sessionId)
     this.deps.delegateTokens.revoke(sessionId)
+    this.currentTurns.delete(sessionId)
     if (!proc) return
     this.processes.delete(sessionId)
     try {

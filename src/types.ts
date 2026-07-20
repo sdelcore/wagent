@@ -206,6 +206,12 @@ export interface UsageSnapshot {
 export interface SessionUpdate {
   kind: SessionUpdateKind
   // Variant payload — shape depends on kind. Documented in docs/architecture.md.
+  // Turn-scoped events additionally carry `turnId?: string` — the id
+  // minted at POST /v1/sessions/:id/message (returned in its 202 body).
+  // Adapters stamp the turn's boundary events (user_message_chunk,
+  // stop); the supervisor back-fills everything else emitted while the
+  // turn is in flight. Optional: events persisted before this existed,
+  // and out-of-turn events, don't have it.
   [key: string]: unknown
 }
 

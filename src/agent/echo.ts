@@ -8,15 +8,20 @@ import type { ContentBlock, PermissionOutcome, Session } from '../types.js'
 //   2. emits a few agent_message_chunks splitting a canned reply
 //   3. emits a stop event with reason: end_turn
 class EchoAgent implements AgentProcess {
-  private cancelled = false
+  private currentTurn: { id: string; cancelled: boolean } | null = null
 
   constructor(
     private readonly session: Session,
     private readonly deps: AgentSpawnDeps,
   ) {}
 
-  async prompt(content: ContentBlock[]): Promise<void> {
-    this.cancelled = false
+  async prompt(turnId: string, content: ContentBlock[]): Promise<void> {
+    // Supersede: cancel any in-flight turn; its loop breaks at the next
+    // tick and emits its own cancelled stop with its own turnId.
+    if (this.currentTurn) this.currentTurn.cancelled = true
+    const turn = { id: turnId, cancelled: false }
+    this.currentTurn = turn
+
     const messageId = randomUUID()
     const userText = content
       .filter((c) => c.type === 'text' && typeof c.text === 'string')
@@ -27,6 +32,7 @@ class EchoAgent implements AgentProcess {
       kind: 'user_message_chunk',
       messageId,
       content,
+      turnId,
     })
 
     const reply = userText.length > 0
@@ -36,23 +42,28 @@ class EchoAgent implements AgentProcess {
     const chunks = chunkText(reply, 16)
     const replyMessageId = randomUUID()
     for (const chunk of chunks) {
-      if (this.cancelled) break
+      if (turn.cancelled) break
       await sleep(40)
       this.deps.emit({
         kind: 'agent_message_chunk',
         messageId: replyMessageId,
         text: chunk,
+        turnId,
       })
     }
 
     this.deps.emit({
       kind: 'stop',
-      reason: this.cancelled ? 'cancelled' : 'end_turn',
+      reason: turn.cancelled ? 'cancelled' : 'end_turn',
+      turnId,
     })
+    if (this.currentTurn === turn) this.currentTurn = null
   }
 
-  async cancel(): Promise<void> {
-    this.cancelled = true
+  async cancel(turnId: string): Promise<void> {
+    const turn = this.currentTurn
+    if (!turn || turn.id !== turnId) return
+    turn.cancelled = true
   }
 
   async respondPermission(_requestId: string, _outcome: PermissionOutcome): Promise<void> {
@@ -60,7 +71,7 @@ class EchoAgent implements AgentProcess {
   }
 
   async close(): Promise<void> {
-    this.cancelled = true
+    if (this.currentTurn) this.currentTurn.cancelled = true
   }
 }
 

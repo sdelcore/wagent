@@ -446,19 +446,14 @@ async function runDelegate(
   // Wait for stop in sync mode; in background mode return immediately
   // and let the child run on its own.
   if (mode === 'background') {
-    let proc
     try {
-      proc = await deps.supervisor.ensure(child.id)
+      await deps.supervisor.prompt(child.id, [{ type: 'text', text: prompt }])
     } catch (err) {
       return toolError(
         `delegate: failed to spawn child: ${err instanceof Error ? err.message : String(err)}`,
         { childSessionId: child.id },
       )
     }
-    const content: ContentBlock[] = [{ type: 'text', text: prompt }]
-    proc.prompt(content).catch((err) => {
-      app.log.error({ err, childId: child.id }, 'delegate: background child prompt failed')
-    })
     return {
       content: [
         { type: 'text', text: `Spawned child ${child.id} in background. Use delegate_status to check.` },
@@ -474,20 +469,14 @@ async function runDelegate(
   // Sync mode: subscribe before spawning so we don't miss any events.
   const turn = awaitTurn(deps.bus, child.id)
 
-  let proc
   try {
-    proc = await deps.supervisor.ensure(child.id)
+    await deps.supervisor.prompt(child.id, [{ type: 'text', text: prompt }])
   } catch (err) {
     return toolError(
       `delegate: failed to spawn child: ${err instanceof Error ? err.message : String(err)}`,
       { childSessionId: child.id },
     )
   }
-
-  const content: ContentBlock[] = [{ type: 'text', text: prompt }]
-  proc.prompt(content).catch((err) => {
-    app.log.error({ err, childId: child.id }, 'delegate: child prompt failed')
-  })
 
   const { finalText, stopReason } = await turn
 
@@ -935,23 +924,14 @@ async function runDelegateCancel(
   if (child.parentSessionId !== parentSessionId) {
     return toolError('delegate_cancel: child does not belong to this parent')
   }
-  const proc = deps.supervisor.get(child.id)
-  if (!proc) {
-    // No live process — child either finished, never spawned, or was
-    // already cancelled. Idempotent ok.
+  const result = await deps.supervisor.abort(child.id)
+  if (result.status !== 'aborted') {
+    // No live process or no turn in flight — child either finished,
+    // never spawned, or was already cancelled. Idempotent ok.
     return {
       content: [{ type: 'text', text: `(child ${child.id} not running)` }],
       structuredContent: { status: 'noop', childSessionId: child.id },
     }
-  }
-  try {
-    await proc.cancel()
-  } catch (err) {
-    app.log.warn({ err, childId: child.id }, 'delegate_cancel failed')
-    return toolError(
-      `delegate_cancel: ${err instanceof Error ? err.message : String(err)}`,
-      { childSessionId: child.id },
-    )
   }
   return {
     content: [{ type: 'text', text: `(cancel requested for ${child.id})` }],

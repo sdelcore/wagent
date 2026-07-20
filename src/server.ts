@@ -225,7 +225,7 @@ async function runDeepProbe(log: FastifyBaseLogger): Promise<DeepProbeResult> {
   })
 
   try {
-    await proc.prompt([{ type: 'text', text: 'ping' }])
+    await proc.prompt(randomUUID(), [{ type: 'text', text: 'ping' }])
     await Promise.race([stopped, budget])
     return { ok: true, durationMs: Date.now() - start }
   } catch (err) {

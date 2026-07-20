@@ -128,6 +128,78 @@ export function translateClaudeMessage(
   }
 }
 
+// How long to wait for the `result` that should follow an error-tagged
+// assistant message on the main turn. The CLI normally emits it in the
+// same breath; observed live (issue #35): a rate_limit-tagged assistant
+// message and then silence, wedging the turn forever. When the guard
+// fires the turn is terminated so `stop` still reaches consumers.
+export const ERROR_TAG_STALL_MS = 10_000
+
+export interface PumpHooks {
+  emit(update: SessionUpdate): void
+  // Resolve the in-flight turn; must be a no-op when no turn is open.
+  resolveTurn(reason: SessionUpdate['reason']): void
+  hasOpenTurn(): boolean
+  turnAborted(): boolean
+  closed(): boolean
+  // True when this result belongs to a superseded turn and must not
+  // resolve the current one.
+  discardResult(): boolean
+  armStallGuard(): void
+  disarmStallGuard(): void
+}
+
+// The adapter's read loop over the SDK stream, extracted so turn
+// termination is testable against synthetic streams. Guarantees the
+// open turn is resolved no matter how the stream ends: result, clean
+// end without a result, or a thrown error (typed `error` event first,
+// then resolution — the caller's prompt() emits the terminal `stop`).
+export async function pumpClaudeStream(
+  stream: AsyncIterable<SDKMessage>,
+  state: ClaudeTranslationState,
+  hooks: PumpHooks,
+): Promise<void> {
+  try {
+    for await (const msg of stream) {
+      if (msg.type === 'result') {
+        hooks.disarmStallGuard()
+        if (hooks.discardResult()) continue
+        hooks.resolveTurn(translateStopReason(msg, hooks.turnAborted()))
+        continue
+      }
+      const updates = translateClaudeMessage(msg, state)
+      for (const u of updates) hooks.emit(u)
+      // An error-tagged assistant message on the main turn should be
+      // followed by a result immediately; guard against the CLI wedging
+      // in between. Subagent messages (parent_tool_use_id set) don't end
+      // the turn, so they must not arm the guard.
+      if (
+        msg.type === 'assistant' &&
+        (msg as { error?: unknown }).error !== undefined &&
+        msg.parent_tool_use_id === null
+      ) {
+        hooks.armStallGuard()
+      }
+    }
+    if (hooks.hasOpenTurn()) {
+      const cancelled = hooks.turnAborted() || hooks.closed()
+      if (!cancelled) {
+        hooks.emit(
+          errorPayloadToUpdate(makeError('internal', 'claude stream ended without a result')),
+        )
+      }
+      hooks.resolveTurn(cancelled ? 'cancelled' : 'error')
+    }
+  } catch (err) {
+    const cancelled = hooks.turnAborted() || hooks.closed()
+    if (!cancelled) {
+      hooks.emit(errorPayloadToUpdate(classifyThrownError(err)))
+    }
+    hooks.resolveTurn(cancelled ? 'cancelled' : 'error')
+    throw err
+  }
+}
+
 export function translateStopReason(
   msg: Extract<SDKMessage, { type: 'result' }>,
   aborted: boolean,
@@ -340,6 +412,17 @@ export function detectClaudeExecutable(): string | undefined {
 // Adapter
 // ---------------------------------------------------------------------------
 
+interface ClaudeTurn {
+  id: string
+  aborted: boolean
+  resolve(reason: SessionUpdate['reason']): void
+}
+
+// How long a supersession waits for the interrupted turn's result
+// before declaring the CLI wedged and tearing the query down. A healthy
+// interrupt yields the old turn's result within milliseconds.
+const SUPERSEDE_DRAIN_MS = 5_000
+
 class ClaudeSdkAgent implements AgentProcess {
   private readonly state: ClaudeTranslationState = { messageId: null }
   private readonly pending = new Map<string, PendingPermission>()
@@ -347,10 +430,13 @@ class ClaudeSdkAgent implements AgentProcess {
   private readonly abort = new AbortController()
   private q: Query | null = null
   private pump: Promise<void> | null = null
-  private currentTurn: {
-    resolve(reason: SessionUpdate['reason']): void
-  } | null = null
-  private aborted = false
+  private currentTurn: ClaudeTurn | null = null
+  // Number of upcoming `result` messages that belong to superseded
+  // turns. The SDK stream is serial — one result per user message — so
+  // the first N results after N supersessions are the dead turns'.
+  private discardResults = 0
+  private discardWaiters: (() => void)[] = []
+  private stallTimer: NodeJS.Timeout | null = null
   private closed = false
 
   constructor(
@@ -458,24 +544,16 @@ class ClaudeSdkAgent implements AgentProcess {
     }
 
     this.q = query({ prompt: this.queue, options: opts })
-    this.pump = this.runPump(this.q).catch((err: unknown) => {
+    // pumpClaudeStream emits the typed `error` event and resolves the
+    // in-flight turn before rethrowing, so the turn's `stop` (emitted by
+    // prompt()'s continuation, already queued as a microtask) lands on
+    // the wire before this catch runs markDead's `subprocess_died`.
+    this.pump = pumpClaudeStream(this.q, this.state, this.pumpHooks()).catch((err: unknown) => {
       // Resolve any pending permission as deny so callers don't hang.
       for (const p of this.pending.values()) {
         p.resolve({ behavior: 'deny', message: 'agent terminated' })
       }
       this.pending.clear()
-      // Surface a typed `error` event before the terminal `subprocess_died`
-      // so callers can branch (e.g. ARIA failover on rate_limit). Skip if
-      // the pump exited because of a clean cancel — that's not an error.
-      if (!this.aborted && !this.closed) {
-        this.deps.emit(errorPayloadToUpdate(classifyThrownError(err)))
-      }
-      // Resolve any in-flight turn as error.
-      const turn = this.currentTurn
-      if (turn) {
-        this.currentTurn = null
-        turn.resolve(this.aborted ? 'cancelled' : 'error')
-      }
       if (!this.closed) {
         this.deps.log.error({ err }, 'claude-agent-sdk pump failed')
         this.deps.markDead(`claude-agent-sdk pump exited: ${(err as Error).message}`)
@@ -483,19 +561,52 @@ class ClaudeSdkAgent implements AgentProcess {
     })
   }
 
-  private async runPump(q: Query): Promise<void> {
-    for await (const msg of q) {
-      if (msg.type === 'result') {
-        const reason = translateStopReason(msg, this.aborted)
+  private pumpHooks(): PumpHooks {
+    return {
+      emit: (u) => this.deps.emit(u),
+      resolveTurn: (reason) => {
         const turn = this.currentTurn
-        if (turn) {
-          this.currentTurn = null
-          turn.resolve(reason)
+        if (!turn) return
+        this.currentTurn = null
+        turn.resolve(reason)
+      },
+      hasOpenTurn: () => this.currentTurn !== null,
+      turnAborted: () => this.currentTurn?.aborted ?? false,
+      closed: () => this.closed,
+      discardResult: () => {
+        if (this.discardResults === 0) return false
+        this.discardResults--
+        if (this.discardResults === 0) {
+          const waiters = this.discardWaiters
+          this.discardWaiters = []
+          for (const w of waiters) w()
         }
-        continue
-      }
-      const updates = translateClaudeMessage(msg, this.state)
-      for (const u of updates) this.deps.emit(u)
+        return true
+      },
+      armStallGuard: () => {
+        if (this.stallTimer) clearTimeout(this.stallTimer)
+        this.stallTimer = setTimeout(() => {
+          this.stallTimer = null
+          const turn = this.currentTurn
+          if (!turn) return
+          this.deps.log.warn(
+            { turnId: turn.id },
+            'claude: no result after error-tagged message, terminating turn',
+          )
+          this.currentTurn = null
+          // If the CLI ever recovers, its late result must not resolve
+          // the next turn.
+          this.discardResults++
+          turn.resolve('error')
+        }, ERROR_TAG_STALL_MS)
+        this.stallTimer.unref?.()
+      },
+      disarmStallGuard: () => {
+        if (this.stallTimer) {
+          clearTimeout(this.stallTimer)
+          this.stallTimer = null
+        }
+      },
     }
   }
 
@@ -524,10 +635,22 @@ class ClaudeSdkAgent implements AgentProcess {
     }
   }
 
-  async prompt(content: WireContent[]): Promise<void> {
+  async prompt(turnId: string, content: WireContent[]): Promise<void> {
     if (!this.q) throw new Error('claude adapter not initialized')
 
-    this.deps.emit({ kind: 'user_message_chunk', content })
+    this.deps.emit({ kind: 'user_message_chunk', content, turnId })
+
+    const prev = this.currentTurn
+    if (prev) {
+      try {
+        await this.supersede(prev)
+      } catch (err) {
+        // The old turn is wedged and the query was torn down. Terminate
+        // this turn's contract too — it never reached the SDK.
+        this.deps.emit({ kind: 'stop', reason: 'error', turnId })
+        throw err
+      }
+    }
 
     // Translate wire content blocks into the Anthropic message-param
     // shape the SDK expects.
@@ -548,9 +671,8 @@ class ClaudeSdkAgent implements AgentProcess {
           },
     )
 
-    this.aborted = false
     const turnDone = new Promise<SessionUpdate['reason']>((resolve) => {
-      this.currentTurn = { resolve }
+      this.currentTurn = { id: turnId, aborted: false, resolve }
     })
 
     this.queue.push({
@@ -560,20 +682,61 @@ class ClaudeSdkAgent implements AgentProcess {
     } as SDKUserMessage)
 
     const reason = await turnDone
-    this.deps.emit({ kind: 'stop', reason })
+    this.deps.emit({ kind: 'stop', reason, turnId })
   }
 
-  async cancel(): Promise<void> {
-    this.aborted = true
+  // A prompt arriving while a turn is in flight cancels it: resolve the
+  // old turn (its prompt() emits the cancelled stop), interrupt the SDK
+  // so it stops generating, and wait for the interrupted turn's result
+  // to drain — the SDK stream carries no turn correlation, so the new
+  // turn can't start until the old turn's result is accounted for. A
+  // drain timeout means the CLI is wedged (issue #36's ghost turn):
+  // tear the query down so the next prompt respawns cleanly instead of
+  // wedging forever.
+  private async supersede(prev: ClaudeTurn): Promise<void> {
+    this.currentTurn = null
+    this.discardResults++
+    prev.resolve('cancelled')
     try {
-      // Per the SDK README, the recommended interrupt is Query.interrupt()
-      // — not aborting the controller, which tears down the whole
-      // conversation. Try interrupt first, fall back to abort.
-      const maybeInterrupt = (this.q as unknown as { interrupt?: () => Promise<void> }).interrupt
-      if (typeof maybeInterrupt === 'function') {
-        await maybeInterrupt.call(this.q)
-        return
-      }
+      await this.interruptQuery()
+    } catch (err) {
+      this.deps.log.warn({ err }, 'claude: interrupt during supersede failed')
+    }
+    const drained = await this.waitForDiscardDrain(SUPERSEDE_DRAIN_MS)
+    if (!drained) {
+      this.abort.abort()
+      throw new Error('claude: superseded turn never yielded a result; killing query for respawn')
+    }
+  }
+
+  private async interruptQuery(): Promise<boolean> {
+    // Per the SDK README, the recommended interrupt is Query.interrupt()
+    // — not aborting the controller, which tears down the whole
+    // conversation.
+    const maybeInterrupt = (this.q as unknown as { interrupt?: () => Promise<void> }).interrupt
+    if (typeof maybeInterrupt !== 'function') return false
+    await maybeInterrupt.call(this.q)
+    return true
+  }
+
+  private waitForDiscardDrain(ms: number): Promise<boolean> {
+    if (this.discardResults === 0) return Promise.resolve(true)
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), ms)
+      timer.unref?.()
+      this.discardWaiters.push(() => {
+        clearTimeout(timer)
+        resolve(true)
+      })
+    })
+  }
+
+  async cancel(turnId: string): Promise<void> {
+    const turn = this.currentTurn
+    if (!turn || turn.id !== turnId) return
+    turn.aborted = true
+    try {
+      if (await this.interruptQuery()) return
     } catch (err) {
       this.deps.log.warn({ err }, 'claude: interrupt failed, falling back to abort')
     }
@@ -605,6 +768,10 @@ class ClaudeSdkAgent implements AgentProcess {
 
   async close(): Promise<void> {
     this.closed = true
+    if (this.stallTimer) {
+      clearTimeout(this.stallTimer)
+      this.stallTimer = null
+    }
     try {
       this.queue.end()
     } catch {}

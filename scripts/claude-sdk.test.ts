@@ -9,9 +9,11 @@ import {
   classifyAssistantError,
   classifyThrownError,
   errorPayloadToUpdate,
+  pumpClaudeStream,
   translateClaudeMessage,
   translateStopReason,
   type ClaudeTranslationState,
+  type PumpHooks,
 } from '../src/agent/claude_sdk.js'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 
@@ -486,4 +488,145 @@ test('translateClaudeMessage: assistant without error tag does not emit error ev
   )
   assert.equal(out.length, 1)
   assert.equal((out[0] as { kind: string }).kind, 'tool_call')
+})
+
+// ---------------------------------------------------------------------------
+// Pump turn-termination guarantees
+// ---------------------------------------------------------------------------
+
+function pumpHarness(overrides: Partial<PumpHooks> = {}) {
+  const log: string[] = []
+  let open = true
+  const hooks: PumpHooks = {
+    emit: (u) =>
+      log.push(`emit:${u.kind}${typeof u.category === 'string' ? `:${u.category}` : ''}`),
+    resolveTurn: (reason) => {
+      if (!open) return
+      open = false
+      log.push(`resolve:${reason}`)
+    },
+    hasOpenTurn: () => open,
+    turnAborted: () => false,
+    closed: () => false,
+    discardResult: () => false,
+    armStallGuard: () => log.push('arm'),
+    disarmStallGuard: () => {},
+    ...overrides,
+  }
+  return { log, hooks }
+}
+
+async function* sdkStream(msgs: unknown[], failWith?: unknown): AsyncGenerator<SDKMessage> {
+  for (const m of msgs) yield m as SDKMessage
+  if (failWith !== undefined) throw failWith
+}
+
+const RESULT_SUCCESS = {
+  type: 'result',
+  subtype: 'success',
+  stop_reason: 'end_turn',
+} as unknown as SDKMessage
+
+const MESSAGE_START = {
+  type: 'stream_event',
+  event: { type: 'message_start' },
+} as unknown as SDKMessage
+
+test('pump: normal turn resolves end_turn with no error event', async () => {
+  const { log, hooks } = pumpHarness()
+  await pumpClaudeStream(
+    sdkStream([
+      MESSAGE_START,
+      {
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } },
+      },
+      RESULT_SUCCESS,
+    ]),
+    state(),
+    hooks,
+  )
+  assert.deepEqual(log, ['emit:agent_message_chunk', 'resolve:end_turn'])
+})
+
+test('pump: stream ends without a result → error event then resolve error', async () => {
+  const { log, hooks } = pumpHarness()
+  await pumpClaudeStream(sdkStream([MESSAGE_START]), state(), hooks)
+  assert.deepEqual(log, ['emit:error:internal', 'resolve:error'])
+})
+
+test('pump: mid-stream throw → typed error event before turn resolution', async () => {
+  const { log, hooks } = pumpHarness()
+  await assert.rejects(
+    pumpClaudeStream(
+      sdkStream([MESSAGE_START], { status: 503, message: 'overloaded' }),
+      state(),
+      hooks,
+    ),
+  )
+  assert.deepEqual(log, ['emit:error:upstream_5xx', 'resolve:error'])
+})
+
+test('pump: throw on an aborted turn resolves cancelled without an error event', async () => {
+  const { log, hooks } = pumpHarness({ turnAborted: () => true })
+  await assert.rejects(
+    pumpClaudeStream(sdkStream([], { name: 'AbortError', message: 'aborted' }), state(), hooks),
+  )
+  assert.deepEqual(log, ['resolve:cancelled'])
+})
+
+test('pump: error-tagged assistant on the main turn arms the stall guard', async () => {
+  const { log, hooks } = pumpHarness()
+  await pumpClaudeStream(
+    sdkStream([
+      {
+        type: 'assistant',
+        message: { role: 'assistant', content: [] },
+        parent_tool_use_id: null,
+        error: 'rate_limit',
+      },
+      RESULT_SUCCESS,
+    ]),
+    state(),
+    hooks,
+  )
+  assert.deepEqual(log, ['emit:error:rate_limit', 'arm', 'resolve:end_turn'])
+})
+
+test('pump: error-tagged subagent assistant does not arm the stall guard', async () => {
+  const { log, hooks } = pumpHarness()
+  await pumpClaudeStream(
+    sdkStream([
+      {
+        type: 'assistant',
+        message: { role: 'assistant', content: [] },
+        parent_tool_use_id: 'tool-parent',
+        error: 'rate_limit',
+      },
+      RESULT_SUCCESS,
+    ]),
+    state(),
+    hooks,
+  )
+  assert.deepEqual(log, ['emit:error:rate_limit', 'resolve:end_turn'])
+})
+
+test('pump: a superseded turn\'s result is swallowed, the next one resolves', async () => {
+  let discards = 1
+  const { log, hooks } = pumpHarness({
+    discardResult: () => {
+      if (discards === 0) return false
+      discards--
+      return true
+    },
+  })
+  await pumpClaudeStream(sdkStream([RESULT_SUCCESS, RESULT_SUCCESS]), state(), hooks)
+  assert.deepEqual(log, ['resolve:end_turn'])
+  assert.equal(discards, 0)
+})
+
+test('pump: result on an aborted turn resolves cancelled', async () => {
+  const { log, hooks } = pumpHarness({ turnAborted: () => true })
+  await pumpClaudeStream(sdkStream([RESULT_SUCCESS]), state(), hooks)
+  assert.deepEqual(log, ['resolve:cancelled'])
 })
