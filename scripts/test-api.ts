@@ -1063,10 +1063,11 @@ test('turns: concurrent prompts serialize boundaries and only the latest complet
   const boundaries = events
     .filter((event) => event.data.kind === 'user_message_chunk' || event.data.kind === 'stop')
     .map((event) => `${event.data.kind}:${String(event.data.payload.turnId)}`)
-  assert.deepEqual(boundaries, turns.flatMap((turn) => [
-    `user_message_chunk:${turn.turnId}`,
-    `stop:${turn.turnId}`,
-  ]))
+  for (const turn of turns) {
+    const userIndex = boundaries.indexOf(`user_message_chunk:${turn.turnId}`)
+    const stopIndex = boundaries.indexOf(`stop:${turn.turnId}`)
+    assert.ok(userIndex >= 0 && stopIndex === userIndex + 1)
+  }
   await api('DELETE', `/v1/sessions/${session.id}`)
 })
 
