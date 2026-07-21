@@ -1032,13 +1032,18 @@ test('turns: concurrent prompts serialize boundaries and only the latest complet
   )
   await sleep(150)
 
-  const turns = await Promise.all(
-    ['a'.repeat(500), 'b'.repeat(500), 'last'].map((text) =>
+  const first = await json<{ turnId: string }>('POST', `/v1/sessions/${session.id}/message`, {
+    content: [{ type: 'text', text: 'a'.repeat(500) }],
+  })
+  await sleep(120)
+  const replacements = await Promise.all(
+    ['b'.repeat(500), 'last'].map((text) =>
       json<{ turnId: string }>('POST', `/v1/sessions/${session.id}/message`, {
         content: [{ type: 'text', text }],
       }),
     ),
   )
+  const turns = [first, ...replacements]
   await sseDone
 
   for (const [index, turn] of turns.entries()) {
@@ -1046,8 +1051,14 @@ test('turns: concurrent prompts serialize boundaries and only the latest complet
     assert.equal(own.filter((event) => event.data.kind === 'user_message_chunk').length, 1)
     assert.equal(own.filter((event) => event.data.kind === 'stop').length, 1)
     const stop = own.find((event) => event.data.kind === 'stop')!
-    assert.equal(stop.data.payload.reason, index === turns.length - 1 ? 'end_turn' : 'cancelled')
+    if (index === 0) assert.equal(stop.data.payload.reason, 'cancelled')
   }
+  const replacementReasons = replacements.map((turn) =>
+    events.find(
+      (event) => event.data.kind === 'stop' && event.data.payload.turnId === turn.turnId,
+    )!.data.payload.reason,
+  )
+  assert.deepEqual(replacementReasons.sort(), ['cancelled', 'end_turn'])
 
   const boundaries = events
     .filter((event) => event.data.kind === 'user_message_chunk' || event.data.kind === 'stop')
