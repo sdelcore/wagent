@@ -11,8 +11,8 @@ All harness work goes through one shape (`src/agent/process.ts`):
 
 ```ts
 interface AgentProcess {
-  prompt(content: ContentBlock[]): Promise<void>
-  cancel(): Promise<void>
+  prompt(turnId: string, content: ContentBlock[]): Promise<void>
+  cancel(turnId: string): Promise<boolean>
   respondPermission(requestId: string, outcome: PermissionOutcome): Promise<void>
   setModel?(model: string): Promise<void>
   close(): Promise<void>

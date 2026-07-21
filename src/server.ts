@@ -230,7 +230,7 @@ async function runDeepProbe(log: FastifyBaseLogger): Promise<DeepProbeResult> {
   try {
     proc = await echoFactory.spawn(fakeSession, {
       log: log.child({ healthDeep: true }),
-      emit: onUpdate,
+      emit: (_turnId, update) => onUpdate(update),
       markDead: (reason) => stopReject?.(new Error(`markDead: ${reason}`)),
     })
   } catch (err) {

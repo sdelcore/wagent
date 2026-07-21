@@ -1,7 +1,9 @@
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import type { AgentKind } from '../types.js'
+import type { SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk'
+import { reapProcessGroup, signalProcessGroup } from './process_group.js'
 
 export interface AgentAvailability {
   id: AgentKind
@@ -96,6 +98,12 @@ const modelCache = new Map<
   AgentKind,
   { models?: AgentModel[]; modelsError?: string; expiresAt: number }
 >()
+const installInFlight = new Map<AgentKind, Promise<AgentAvailability>>()
+const modelInFlight = new Map<
+  AgentKind,
+  Promise<{ models?: AgentModel[]; modelsError?: string }>
+>()
+let cacheGeneration = 0
 
 export interface ProbeOptions {
   includeModels?: boolean
@@ -111,10 +119,23 @@ export async function probeAgent(
   if (cached && cached.expiresAt > now) {
     base = cached.value
   } else {
-    base = await runInstallProbe(id)
-    installCache.set(id, { value: base, expiresAt: now + INSTALL_TTL_MS })
-    // Only fresh probes count — a cached failure is not new evidence.
-    if (id === 'claude') probeHealth?.record(base)
+    let pending = installInFlight.get(id)
+    if (!pending) {
+      const generation = cacheGeneration
+      pending = runInstallProbe(id).then((result) => {
+        if (cacheGeneration === generation) {
+          installCache.set(id, { value: result, expiresAt: Date.now() + INSTALL_TTL_MS })
+          if (id === 'claude') probeHealth?.record(result)
+        }
+        return result
+      })
+      installInFlight.set(id, pending)
+      const cleanup = () => {
+        if (installInFlight.get(id) === pending) installInFlight.delete(id)
+      }
+      void pending.then(cleanup, cleanup)
+    }
+    base = await pending
   }
 
   if (!opts.includeModels) return base
@@ -129,8 +150,22 @@ export async function probeAgent(
     }
   }
 
-  const probed = await runModelProbe(id)
-  modelCache.set(id, { ...probed, expiresAt: now + MODEL_TTL_MS })
+  let pendingModels = modelInFlight.get(id)
+  if (!pendingModels) {
+    const generation = cacheGeneration
+    pendingModels = runModelProbe(id).then((result) => {
+      if (cacheGeneration === generation) {
+        modelCache.set(id, { ...result, expiresAt: Date.now() + MODEL_TTL_MS })
+      }
+      return result
+    })
+    modelInFlight.set(id, pendingModels)
+    const cleanup = () => {
+      if (modelInFlight.get(id) === pendingModels) modelInFlight.delete(id)
+    }
+    void pendingModels.then(cleanup, cleanup)
+  }
+  const probed = await pendingModels
   return {
     ...base,
     ...(probed.models !== undefined ? { models: probed.models } : {}),
@@ -145,8 +180,11 @@ export async function probeAll(opts: ProbeOptions = {}): Promise<AgentAvailabili
 }
 
 export function clearCache(): void {
+  cacheGeneration++
   installCache.clear()
   modelCache.clear()
+  installInFlight.clear()
+  modelInFlight.clear()
 }
 
 async function runInstallProbe(id: AgentKind): Promise<AgentAvailability> {
@@ -205,27 +243,19 @@ async function probeClaude(): Promise<AgentAvailability> {
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
     })
-    const killGroup = () => {
-      try {
-        if (child.pid !== undefined) {
-          process.kill(-child.pid, 'SIGKILL')
-          return
-        }
-      } catch {}
-      try {
-        child.kill('SIGKILL')
-      } catch {}
+    const pgid = child.pid
+    const reap = async () => {
+      if (pgid !== undefined) await reapProcessGroup(pgid, child, 250)
     }
     const timer = setTimeout(() => {
       if (!resolved) {
         resolved = true
-        killGroup()
-        resolve({
+        void reap().then(() => resolve({
           id: 'claude',
           installed: false,
           reason: 'probe_failed',
           notes: `${claudeBin} --version timed out (>${timeoutMs / 1000}s)`,
-        })
+        }))
       }
     }, timeoutMs)
 
@@ -239,12 +269,12 @@ async function probeClaude(): Promise<AgentAvailability> {
       resolved = true
       clearTimeout(timer)
       const code = (err as NodeJS.ErrnoException).code
-      resolve({
+      void reap().then(() => resolve({
         id: 'claude',
         installed: false,
         reason: code === 'ENOENT' ? 'binary_missing' : 'probe_failed',
         notes: `${claudeBin} --version error: ${err.message}`,
-      })
+      }))
     })
 
     child.on('exit', (code) => {
@@ -252,20 +282,20 @@ async function probeClaude(): Promise<AgentAvailability> {
       resolved = true
       clearTimeout(timer)
       if (code !== 0) {
-        resolve({
+        void reap().then(() => resolve({
           id: 'claude',
           installed: false,
           reason: 'probe_failed',
           notes: `${claudeBin} --version exit code ${code}`,
-        })
+        }))
         return
       }
-      resolve({
+      void reap().then(() => resolve({
         id: 'claude',
         installed: true,
         version: out.trim().split('\n')[0],
         notes: 'in-process via @anthropic-ai/claude-agent-sdk; auth via Claude Code OAuth (~/.claude/) or ANTHROPIC_API_KEY',
-      })
+      }))
     })
   })
 }
@@ -343,7 +373,13 @@ const CLAUDE_MODEL_PROBE_BUDGET_MS = 8_000
 // MODEL_TTL_MS to keep the first hit cost off the hot path.
 async function probeClaudeModels(): Promise<{ models?: AgentModel[]; modelsError?: string }> {
   const abort = new AbortController()
-  const budget = setTimeout(() => abort.abort(), CLAUDE_MODEL_PROBE_BUDGET_MS)
+  const timeoutMs = parsePositiveInt(
+    process.env.WAGENT_CLAUDE_MODEL_PROBE_TIMEOUT_MS,
+    CLAUDE_MODEL_PROBE_BUDGET_MS,
+  )
+  const budget = setTimeout(() => abort.abort(), timeoutMs)
+  let cli: ChildProcess | null = null
+  let pgid: number | null = null
 
   let q:
     | {
@@ -367,9 +403,40 @@ async function probeClaudeModels(): Promise<{ models?: AgentModel[]; modelsError
         abortController: abort,
         cwd: process.cwd(),
         ...(claudeBin ? { pathToClaudeCodeExecutable: claudeBin } : {}),
+        spawnClaudeCodeProcess: (opts: SpawnOptions): SpawnedProcess => {
+          const child = spawn(opts.command, opts.args, {
+            cwd: opts.cwd,
+            env: opts.env,
+            stdio: ['pipe', 'pipe', 'ignore'],
+            signal: opts.signal,
+            detached: true,
+          })
+          cli = child
+          pgid = child.pid ?? null
+          return {
+            stdin: child.stdin!,
+            stdout: child.stdout!,
+            get killed() { return child.killed },
+            get exitCode() { return child.exitCode },
+            kill: (signal) => child.pid !== undefined
+              ? signalProcessGroup(child.pid, child, signal)
+              : false,
+            on: child.on.bind(child),
+            once: child.once.bind(child),
+            off: child.off.bind(child),
+          }
+        },
       },
     }) as unknown as { supportedModels(): Promise<unknown>; interrupt?: () => Promise<void> }
-    const raw = (await q.supportedModels()) as Array<{
+    const raw = (await Promise.race([
+      q.supportedModels(),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          abort.abort()
+          reject(new Error(`claude model probe timed out after ${timeoutMs}ms`))
+        }, timeoutMs).unref?.()
+      }),
+    ])) as Array<{
       value: string
       displayName?: string
       supportsEffort?: boolean
@@ -407,7 +474,14 @@ async function probeClaudeModels(): Promise<{ models?: AgentModel[]; modelsError
         new Promise((r) => setTimeout(r, 3_000).unref?.()),
       ])
     }
+    if (cli && pgid !== null) await reapProcessGroup(pgid, cli, 1_000)
   }
+}
+
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || !/^\d+$/.test(raw)) return fallback
+  const value = Number(raw)
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback
 }
 
 async function* hangingPromptStream(signal: AbortSignal): AsyncIterable<never> {

@@ -197,25 +197,12 @@ class PiSdkAgent implements AgentProcess {
   ) {
     this.unsubscribe = session.subscribe((event) => {
       const update = translatePiEvent(event, this.ctx)
-      if (update) this.deps.emit(update)
+      if (update) this.deps.emit(this.currentTurn?.id ?? null, update)
     })
   }
 
   async prompt(turnId: string, content: WireContent[]): Promise<void> {
-    this.deps.emit({ kind: 'user_message_chunk', content, turnId })
-
-    // Supersede: a prompt arriving while a turn is in flight cancels it.
-    // The old prompt() invocation holds its own turn object, so its
-    // `stop` resolves with reason 'cancelled' and the old turnId.
-    const prev = this.currentTurn
-    if (prev) {
-      prev.aborted = true
-      try {
-        await this.session.abort()
-      } catch (err) {
-        this.deps.log.warn({ err }, 'pi: abort during supersede failed')
-      }
-    }
+    this.deps.emit(turnId, { kind: 'user_message_chunk', content })
 
     const text = content
       .filter((c) => c.type === 'text' && typeof c.text === 'string')
@@ -234,10 +221,9 @@ class PiSdkAgent implements AgentProcess {
     this.currentTurn = turn
     try {
       await this.session.prompt(text, images.length > 0 ? { images } : undefined)
-      this.deps.emit({
+      this.deps.emit(turnId, {
         kind: 'stop',
         reason: turn.aborted ? 'cancelled' : 'end_turn',
-        turnId,
       })
     } catch (err) {
       this.deps.log.error({ err }, 'pi prompt failed')
@@ -247,24 +233,28 @@ class PiSdkAgent implements AgentProcess {
       // matches a known pattern, then terminate the turn.
       if (!turn.aborted) {
         const message = err instanceof Error ? err.message : String(err)
-        this.deps.emit(errorPayloadToUpdate(classifyPiErrorMessage(message)))
+        this.deps.emit(turnId, errorPayloadToUpdate(classifyPiErrorMessage(message)))
       }
-      this.deps.emit({
+      this.deps.emit(turnId, {
         kind: 'stop',
         reason: turn.aborted ? 'cancelled' : 'error',
-        turnId,
       })
-      throw err
     } finally {
       if (this.currentTurn === turn) this.currentTurn = null
     }
   }
 
-  async cancel(turnId: string): Promise<void> {
+  async cancel(turnId: string): Promise<boolean> {
     const turn = this.currentTurn
-    if (!turn || turn.id !== turnId) return
+    if (!turn || turn.id !== turnId) return false
     turn.aborted = true
-    await this.session.abort()
+    try {
+      await this.session.abort()
+    } catch (err) {
+      turn.aborted = false
+      throw err
+    }
+    return true
   }
 
   async respondPermission(_requestId: string, _outcome: PermissionOutcome): Promise<void> {

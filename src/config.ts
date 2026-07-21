@@ -42,6 +42,7 @@ export function loadConfig(): Config {
 
 function parseThreshold(raw: string | undefined): number {
   if (raw === undefined) return 5
-  const n = Number.parseInt(raw, 10)
-  return Number.isFinite(n) && n >= 0 ? n : 5
+  if (!/^\d+$/.test(raw)) return 5
+  const n = Number(raw)
+  return Number.isSafeInteger(n) ? n : 5
 }

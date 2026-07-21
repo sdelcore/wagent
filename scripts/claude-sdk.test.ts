@@ -508,7 +508,6 @@ function pumpHarness(overrides: Partial<PumpHooks> = {}) {
     hasOpenTurn: () => open,
     turnAborted: () => false,
     closed: () => false,
-    discardResult: () => false,
     armStallGuard: () => log.push('arm'),
     disarmStallGuard: () => {},
     ...overrides,
@@ -609,20 +608,6 @@ test('pump: error-tagged subagent assistant does not arm the stall guard', async
     hooks,
   )
   assert.deepEqual(log, ['emit:error:rate_limit', 'resolve:end_turn'])
-})
-
-test('pump: a superseded turn\'s result is swallowed, the next one resolves', async () => {
-  let discards = 1
-  const { log, hooks } = pumpHarness({
-    discardResult: () => {
-      if (discards === 0) return false
-      discards--
-      return true
-    },
-  })
-  await pumpClaudeStream(sdkStream([RESULT_SUCCESS, RESULT_SUCCESS]), state(), hooks)
-  assert.deepEqual(log, ['resolve:end_turn'])
-  assert.equal(discards, 0)
 })
 
 test('pump: result on an aborted turn resolves cancelled', async () => {

@@ -145,3 +145,16 @@ test('probeClaude: nonzero exit → probe_failed without timeout note', async ()
   assert.equal(result.reason, 'probe_failed')
   assert.doesNotMatch(result.notes ?? '', /timed out/)
 })
+
+test('probeClaude: concurrent cache misses share one binary invocation', async () => {
+  const count = join(dir, 'probe-count')
+  process.env.CLAUDE_CODE_EXECUTABLE = fakeBin(
+    'claude-counted',
+    `#!/bin/sh\nprintf x >> "${count}"\nsleep 0.1\nprintf "9.9.9\\n"\n`,
+  )
+  clearCache()
+  const results = await Promise.all(Array.from({ length: 10 }, () => probeAgent('claude')))
+  assert.ok(results.every((result) => result.installed))
+  const { readFileSync } = await import('node:fs')
+  assert.equal(readFileSync(count, 'utf8'), 'x')
+})

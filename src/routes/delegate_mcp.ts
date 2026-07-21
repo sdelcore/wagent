@@ -9,6 +9,7 @@ import {
   type AgentKind,
   type ContentBlock,
   type DelegationMode,
+  type EventEnvelope,
   type SessionUpdate,
 } from '../types.js'
 import type { EventStore } from '../events/store.js'
@@ -470,15 +471,17 @@ async function runDelegate(
   const turn = awaitTurn(deps.bus, child.id)
 
   try {
-    await deps.supervisor.prompt(child.id, [{ type: 'text', text: prompt }])
+    const submitted = await deps.supervisor.prompt(child.id, [{ type: 'text', text: prompt }])
+    turn.setExpectedTurnId(submitted.turnId)
   } catch (err) {
+    turn.cancel()
     return toolError(
       `delegate: failed to spawn child: ${err instanceof Error ? err.message : String(err)}`,
       { childSessionId: child.id },
     )
   }
 
-  const { finalText, stopReason } = await turn
+  const { finalText, stopReason } = await turn.result
 
   const text = finalText.length > 0 ? finalText : `(child stopped: ${stopReason})`
   return {
@@ -1102,11 +1105,22 @@ async function runDelegateCancelRemote(
 // Subscribe to a child's bus, accumulate assistant text, resolve when
 // the session reaches a terminal event. Caller must invoke this before
 // spawning so no early events are missed.
-function awaitTurn(bus: SessionBus, childSessionId: string): Promise<TurnResult> {
-  return new Promise<TurnResult>((resolve) => {
+function awaitTurn(
+  bus: SessionBus,
+  childSessionId: string,
+): { result: Promise<TurnResult>; setExpectedTurnId(turnId: string): void; cancel(): void } {
+  let expectedTurnId: string | null = null
+  const buffered: EventEnvelope[] = []
+  let consume: (ev: EventEnvelope) => void = (ev) => buffered.push(ev)
+  let unsubscribe = () => {}
+  const result = new Promise<TurnResult>((resolve) => {
     let finalText = ''
-    const unsubscribe = bus.subscribe(childSessionId, (ev) => {
+    unsubscribe = bus.subscribe(childSessionId, (ev) => {
+      consume(ev)
+    })
+    consume = (ev) => {
       const payload = ev.payload as SessionUpdate & { text?: string; reason?: string }
+      if (payload.turnId !== expectedTurnId) return
       if (payload.kind === 'agent_message_chunk' && typeof payload.text === 'string') {
         finalText += payload.text
       } else if (payload.kind === 'stop') {
@@ -1116,6 +1130,18 @@ function awaitTurn(bus: SessionBus, childSessionId: string): Promise<TurnResult>
         unsubscribe()
         resolve({ finalText, stopReason: payload.kind })
       }
-    })
+    }
   })
+  return {
+    result,
+    setExpectedTurnId(turnId) {
+      expectedTurnId = turnId
+      for (const event of buffered) consume(event)
+      buffered.length = 0
+    },
+    cancel() {
+      unsubscribe()
+      buffered.length = 0
+    },
+  }
 }

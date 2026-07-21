@@ -173,7 +173,9 @@ concrete turn that was cancelled.
 Internal (wagent ↔ harness):
 
 - **Claude** — `@anthropic-ai/claude-agent-sdk`'s `query({ prompt, options })`,
-  in-process. The SDK manages the `claude` CLI child. By default every
+  in-process. wagent supplies the SDK's process-spawn hook and owns the
+  detached `claude` CLI process group so teardown reaches MCP children.
+  By default every
   tool call routes through wagent's `canUseTool` callback and surfaces
   as a `permission_request` event that the caller must resolve — i.e.
   the SDK's `--permission-mode bypassPermissions` short-circuit is
@@ -193,6 +195,12 @@ Internal (wagent ↔ harness):
 Both adapters translate vendor events into the same `SessionUpdate`
 shape (see `translateClaudeMessage` / `translatePiEvent`), so routes
 only ever see wagent's wire types.
+
+Claude install and model probes share concurrent cache misses so one host
+slowdown counts as one failure. Five consecutive install-probe timeouts
+cause a controlled exit for systemd to restart the service and reap its
+cgroup. Set `WAGENT_PROBE_DEGRADED_THRESHOLD=0` to disable this watchdog;
+the default is `5`.
 
 ## Session lifecycle
 

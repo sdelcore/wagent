@@ -16,9 +16,6 @@ class EchoAgent implements AgentProcess {
   ) {}
 
   async prompt(turnId: string, content: ContentBlock[]): Promise<void> {
-    // Supersede: cancel any in-flight turn; its loop breaks at the next
-    // tick and emits its own cancelled stop with its own turnId.
-    if (this.currentTurn) this.currentTurn.cancelled = true
     const turn = { id: turnId, cancelled: false }
     this.currentTurn = turn
 
@@ -28,11 +25,10 @@ class EchoAgent implements AgentProcess {
       .map((c) => c.text)
       .join('\n')
 
-    this.deps.emit({
+    this.deps.emit(turnId, {
       kind: 'user_message_chunk',
       messageId,
       content,
-      turnId,
     })
 
     const reply = userText.length > 0
@@ -44,26 +40,25 @@ class EchoAgent implements AgentProcess {
     for (const chunk of chunks) {
       if (turn.cancelled) break
       await sleep(40)
-      this.deps.emit({
+      this.deps.emit(turnId, {
         kind: 'agent_message_chunk',
         messageId: replyMessageId,
         text: chunk,
-        turnId,
       })
     }
 
-    this.deps.emit({
+    this.deps.emit(turnId, {
       kind: 'stop',
       reason: turn.cancelled ? 'cancelled' : 'end_turn',
-      turnId,
     })
     if (this.currentTurn === turn) this.currentTurn = null
   }
 
-  async cancel(turnId: string): Promise<void> {
+  async cancel(turnId: string): Promise<boolean> {
     const turn = this.currentTurn
-    if (!turn || turn.id !== turnId) return
+    if (!turn || turn.id !== turnId) return false
     turn.cancelled = true
+    return true
   }
 
   async respondPermission(_requestId: string, _outcome: PermissionOutcome): Promise<void> {
