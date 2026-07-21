@@ -56,6 +56,41 @@ export interface AgentModel {
 const INSTALL_TTL_MS = 30_000
 const MODEL_TTL_MS = 10 * 60_000
 
+// Consecutive-failure tracker for the claude install probe. A probe
+// timeout means process spawning on the host is degraded (issue #29:
+// leaked subprocess trees eventually made `claude --version` take >2s,
+// and every session-create 409'd until a manual restart). The daemon
+// wires `onDegraded` to a controlled self-exit so systemd restarts it —
+// the cgroup kill is the one mechanism that reliably reaps every
+// leaked child.
+export class ProbeHealth {
+  private consecutive = 0
+
+  constructor(
+    private readonly threshold: number,
+    private readonly onDegraded: () => void,
+  ) {}
+
+  record(result: AgentAvailability): void {
+    const timedOut =
+      !result.installed &&
+      result.reason === 'probe_failed' &&
+      /timed out/.test(result.notes ?? '')
+    if (!timedOut) {
+      this.consecutive = 0
+      return
+    }
+    this.consecutive++
+    if (this.consecutive === this.threshold) this.onDegraded()
+  }
+}
+
+let probeHealth: ProbeHealth | null = null
+
+export function setProbeHealth(health: ProbeHealth | null): void {
+  probeHealth = health
+}
+
 const installCache = new Map<AgentKind, { value: AgentAvailability; expiresAt: number }>()
 const modelCache = new Map<
   AgentKind,
@@ -78,6 +113,8 @@ export async function probeAgent(
   } else {
     base = await runInstallProbe(id)
     installCache.set(id, { value: base, expiresAt: now + INSTALL_TTL_MS })
+    // Only fresh probes count — a cached failure is not new evidence.
+    if (id === 'claude') probeHealth?.record(base)
   }
 
   if (!opts.includeModels) return base
@@ -153,24 +190,44 @@ async function probeClaude(): Promise<AgentAvailability> {
     }
   }
 
+  // The timeout is env-tunable mostly for tests; 2s is the production
+  // default. `claude` is typically a launcher that spawns the real
+  // binary — detached gives the probe its own process group so the
+  // timeout kill can't orphan the grandchild (which is exactly the
+  // process that was hanging).
+  const timeoutMs =
+    Number.parseInt(process.env.WAGENT_CLAUDE_PROBE_TIMEOUT_MS ?? '', 10) || 2_000
+
   return new Promise<AgentAvailability>((resolve) => {
     let resolved = false
     const claudeBin = process.env.CLAUDE_CODE_EXECUTABLE ?? 'claude'
-    const child = spawn(claudeBin, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(claudeBin, ['--version'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
+    })
+    const killGroup = () => {
+      try {
+        if (child.pid !== undefined) {
+          process.kill(-child.pid, 'SIGKILL')
+          return
+        }
+      } catch {}
+      try {
+        child.kill('SIGKILL')
+      } catch {}
+    }
     const timer = setTimeout(() => {
       if (!resolved) {
         resolved = true
-        try {
-          child.kill('SIGKILL')
-        } catch {}
+        killGroup()
         resolve({
           id: 'claude',
           installed: false,
           reason: 'probe_failed',
-          notes: `${claudeBin} --version timed out (>2s)`,
+          notes: `${claudeBin} --version timed out (>${timeoutMs / 1000}s)`,
         })
       }
-    }, 2_000)
+    }, timeoutMs)
 
     let out = ''
     child.stdout?.on('data', (b) => {
@@ -288,7 +345,13 @@ async function probeClaudeModels(): Promise<{ models?: AgentModel[]; modelsError
   const abort = new AbortController()
   const budget = setTimeout(() => abort.abort(), CLAUDE_MODEL_PROBE_BUDGET_MS)
 
-  let q: { supportedModels(): Promise<unknown>; interrupt?: () => Promise<void> } | undefined
+  let q:
+    | {
+        supportedModels(): Promise<unknown>
+        interrupt?: () => Promise<void>
+        return?: (value?: unknown) => Promise<unknown>
+      }
+    | undefined
   try {
     const [{ query }, { detectClaudeExecutable }] = await Promise.all([
       import('@anthropic-ai/claude-agent-sdk'),
@@ -335,6 +398,15 @@ async function probeClaudeModels(): Promise<{ models?: AgentModel[]; modelsError
   } finally {
     clearTimeout(budget)
     if (!abort.signal.aborted) abort.abort()
+    // abort alone sends one fire-and-forget SIGTERM to the CLI child.
+    // Query.return() drives the SDK's transport.close(), the only path
+    // with SIGTERM→SIGKILL escalation. Bounded — never block the probe.
+    if (q && typeof q.return === 'function') {
+      await Promise.race([
+        q.return().catch(() => {}),
+        new Promise((r) => setTimeout(r, 3_000).unref?.()),
+      ])
+    }
   }
 }
 

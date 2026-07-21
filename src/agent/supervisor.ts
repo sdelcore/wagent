@@ -126,8 +126,17 @@ export class AgentSupervisor {
           // Subprocess exited unexpectedly. Drop the handle so the
           // next prompt respawns; emit an event so clients render a
           // "agent crashed, send a prompt to restart" affordance.
+          const dead = this.processes.get(sessionId)
           this.processes.delete(sessionId)
           this.deps.delegateTokens.revoke(sessionId)
+          // Best-effort release of whatever the half-dead harness still
+          // holds (subprocess trees, subscriptions, timers) — a dropped
+          // handle would otherwise leak them for the daemon's lifetime.
+          if (dead) {
+            dead.close().catch((err) => {
+              this.deps.log.warn({ err, sessionId }, 'close of dead agent failed')
+            })
+          }
           const current = this.currentTurns.get(sessionId)
           this.currentTurns.delete(sessionId)
           const event = this.deps.eventStore.append(sessionId, {

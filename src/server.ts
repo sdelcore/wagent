@@ -23,7 +23,7 @@ import { registerProjectRoutes } from './routes/projects.js'
 import { registerAgentRoutes } from './routes/agents.js'
 import { registerFsRoutes } from './routes/fs.js'
 import { registerDelegateMcpRoutes } from './routes/delegate_mcp.js'
-import { probeAll } from './agent/availability.js'
+import { probeAll, ProbeHealth, setProbeHealth } from './agent/availability.js'
 import type { Session, SessionUpdate } from './types.js'
 
 const PKG_PATH = fileURLToPath(new URL('../package.json', import.meta.url))
@@ -126,6 +126,32 @@ async function main() {
     supervisor,
     delegateTokens,
   })
+
+  // Persistent-degradation watchdog: once `claude --version` has timed
+  // out this many times in a row, the host's process table is wedged
+  // (issue #29) and every session-create is 409ing anyway. A controlled
+  // exit lets systemd restart the daemon — its cgroup kill reaps every
+  // leaked child and orphaned grandchild, which no in-process cleanup
+  // can guarantee at that point.
+  if (config.probeDegradedThreshold > 0) {
+    setProbeHealth(
+      new ProbeHealth(config.probeDegradedThreshold, () => {
+        app.log.fatal(
+          { threshold: config.probeDegradedThreshold },
+          'claude probe persistently timing out — exiting so systemd can restart and reap',
+        )
+        void (async () => {
+          try {
+            await Promise.race([
+              supervisor.closeAll(),
+              new Promise((r) => setTimeout(r, 5_000)),
+            ])
+          } catch {}
+          process.exit(1)
+        })()
+      }),
+    )
+  }
 
   const shutdown = async () => {
     try {
