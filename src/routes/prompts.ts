@@ -57,46 +57,51 @@ export function registerPromptRoutes(app: FastifyInstance, deps: PromptDeps) {
       )
     }
 
-    let process
+    // Fire and forget — events stream over SSE. HTTP returns 202 once
+    // the prompt has been queued/sent to the agent, carrying the minted
+    // turnId so the caller can abort this specific turn later.
+    let turnId: string
     try {
-      process = await deps.supervisor.ensure(req.params.id)
+      ;({ turnId } = await deps.supervisor.prompt(req.params.id, content))
     } catch (err) {
       const message = err instanceof Error ? err.message : 'spawn failed'
       return bad(reply, 500, 'spawn_failed', message)
     }
 
-    // Flip the session to 'running' immediately so concurrent list
-    // readers see the in-flight turn before the first SSE event lands.
-    // The supervisor's emit hook will keep status in sync from here on.
-    deps.sessionStore.applyStatus(req.params.id, 'running')
-
-    // Fire and forget — events stream over SSE. HTTP returns 202 once
-    // the prompt has been queued/sent to the agent.
-    process.prompt(content).catch((err) => {
-      app.log.error({ err, sessionId: req.params.id }, 'prompt failed')
-    })
-
     reply.code(202)
-    return { status: 'accepted', sessionId: req.params.id }
+    return { status: 'accepted', sessionId: req.params.id, turnId }
   })
 
   // POST /v1/sessions/:id/abort — stop the in-flight prompt turn.
   // "abort" is the industry verb (Anthropic SDK, OpenAI, OpenCode all
-  // use it); ACP uses `session/cancel`.
-  app.post<{ Params: { id: string } }>('/v1/sessions/:id/abort', async (req, reply) => {
+  // use it); ACP uses `session/cancel`. An optional body `{ turnId }`
+  // scopes the abort to that turn: naming a turn that already ended is
+  // a distinguishable no-op, so steering clients can abort-then-post
+  // without ever cancelling the turn they're about to start.
+  app.post<{
+    Params: { id: string }
+    Body: { turnId?: unknown }
+  }>('/v1/sessions/:id/abort', async (req, reply) => {
     const session = deps.sessionStore.get(req.params.id)
     if (!session) return bad(reply, 404, 'not_found', `session ${req.params.id} not found`)
-    const proc = deps.supervisor.get(req.params.id)
-    if (!proc) {
-      // Idempotent: aborting a session with no live process is a no-op.
-      return { status: 'noop', sessionId: req.params.id }
+    const rawTurnId = req.body?.turnId
+    if (rawTurnId !== undefined && typeof rawTurnId !== 'string') {
+      return bad(reply, 400, 'invalid_turn_id', 'turnId must be a string')
     }
-    try {
-      await proc.cancel()
-    } catch (err) {
-      app.log.warn({ err, sessionId: req.params.id }, 'abort failed')
+    const result = await deps.supervisor.abort(req.params.id, rawTurnId)
+    switch (result.status) {
+      case 'aborted':
+        return { status: 'aborted', sessionId: req.params.id, turnId: result.turnId }
+      case 'turn_not_current':
+        return {
+          status: 'noop',
+          sessionId: req.params.id,
+          turnId: rawTurnId,
+          reason: 'turn_not_current',
+        }
+      case 'no_active_turn':
+        return { status: 'noop', sessionId: req.params.id, reason: 'no_active_turn' }
     }
-    return { status: 'aborted', sessionId: req.params.id }
   })
 
   // POST /v1/sessions/:id/permissions/:requestId — respond to a pending

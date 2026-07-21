@@ -8,22 +8,24 @@ import type { ContentBlock, PermissionOutcome, Session } from '../types.js'
 //   2. emits a few agent_message_chunks splitting a canned reply
 //   3. emits a stop event with reason: end_turn
 class EchoAgent implements AgentProcess {
-  private cancelled = false
+  private currentTurn: { id: string; cancelled: boolean } | null = null
 
   constructor(
     private readonly session: Session,
     private readonly deps: AgentSpawnDeps,
   ) {}
 
-  async prompt(content: ContentBlock[]): Promise<void> {
-    this.cancelled = false
+  async prompt(turnId: string, content: ContentBlock[]): Promise<void> {
+    const turn = { id: turnId, cancelled: false }
+    this.currentTurn = turn
+
     const messageId = randomUUID()
     const userText = content
       .filter((c) => c.type === 'text' && typeof c.text === 'string')
       .map((c) => c.text)
       .join('\n')
 
-    this.deps.emit({
+    this.deps.emit(turnId, {
       kind: 'user_message_chunk',
       messageId,
       content,
@@ -36,23 +38,27 @@ class EchoAgent implements AgentProcess {
     const chunks = chunkText(reply, 16)
     const replyMessageId = randomUUID()
     for (const chunk of chunks) {
-      if (this.cancelled) break
+      if (turn.cancelled) break
       await sleep(40)
-      this.deps.emit({
+      this.deps.emit(turnId, {
         kind: 'agent_message_chunk',
         messageId: replyMessageId,
         text: chunk,
       })
     }
 
-    this.deps.emit({
+    this.deps.emit(turnId, {
       kind: 'stop',
-      reason: this.cancelled ? 'cancelled' : 'end_turn',
+      reason: turn.cancelled ? 'cancelled' : 'end_turn',
     })
+    if (this.currentTurn === turn) this.currentTurn = null
   }
 
-  async cancel(): Promise<void> {
-    this.cancelled = true
+  async cancel(turnId: string): Promise<boolean> {
+    const turn = this.currentTurn
+    if (!turn || turn.id !== turnId) return false
+    turn.cancelled = true
+    return true
   }
 
   async respondPermission(_requestId: string, _outcome: PermissionOutcome): Promise<void> {
@@ -60,7 +66,7 @@ class EchoAgent implements AgentProcess {
   }
 
   async close(): Promise<void> {
-    this.cancelled = true
+    if (this.currentTurn) this.currentTurn.cancelled = true
   }
 }
 

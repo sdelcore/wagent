@@ -14,8 +14,8 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "smoke": "tsx scripts/smoke.ts",
-    "test": "node --import tsx --test scripts/pi-sdk.test.ts scripts/claude-sdk.test.ts scripts/session-options.test.ts scripts/create-session.test.ts scripts/auth.test.ts scripts/wagent-on-args.test.ts scripts/wagent-on-config.test.ts scripts/test-api.ts scripts/auth-integration.test.ts scripts/wagent-on-integration.test.ts",
-    "test:unit": "node --import tsx --test scripts/pi-sdk.test.ts scripts/claude-sdk.test.ts scripts/session-options.test.ts scripts/create-session.test.ts scripts/auth.test.ts scripts/wagent-on-args.test.ts scripts/wagent-on-config.test.ts"
+    "test": "node --import tsx --test scripts/pi-sdk.test.ts scripts/claude-sdk.test.ts scripts/session-options.test.ts scripts/create-session.test.ts scripts/auth.test.ts scripts/wagent-on-args.test.ts scripts/wagent-on-config.test.ts scripts/availability.test.ts scripts/process-group.test.ts scripts/test-api.ts scripts/auth-integration.test.ts scripts/wagent-on-integration.test.ts",
+    "test:unit": "node --import tsx --test scripts/pi-sdk.test.ts scripts/claude-sdk.test.ts scripts/session-options.test.ts scripts/create-session.test.ts scripts/auth.test.ts scripts/wagent-on-args.test.ts scripts/wagent-on-config.test.ts scripts/availability.test.ts scripts/process-group.test.ts"
   },
   "repository": {
     "type": "git",

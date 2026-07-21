@@ -132,10 +132,50 @@ from any thrown HTTP error. The pi adapter classifies on
 best-effort string match against `errorMessage`; everything else
 is `internal`. echo never emits `error`.
 
+### Turns
+
+Every `POST /v1/sessions/:id/message` mints a **turn id**, returned in
+the 202 body:
+
+```json
+{ "status": "accepted", "sessionId": "…", "turnId": "…" }
+```
+
+Events emitted while the turn is in flight carry `turnId` in their
+payload (adapters stamp the boundary events `user_message_chunk` and
+`stop`; the supervisor back-fills the rest). Events persisted before
+this existed, and out-of-turn events, lack the field — treat it as
+optional.
+
+Invariant: every turn ends with exactly one `stop` carrying its
+`turnId`, however the turn ends (completion, cancel, upstream error,
+harness death). A prompt posted while a turn is in flight
+**supersedes** it: the old turn ends with `stop { reason: 'cancelled' }`
+and the new turn starts. Clients that want strict sequencing should
+wait for `stop` before posting the next message.
+
+`POST /v1/sessions/:id/abort` accepts an optional body
+`{ "turnId": "…" }`. With a turn id, the abort targets only that turn —
+naming a turn that already ended or was superseded is a no-op, so a
+steering client can abort-then-post without any risk of cancelling the
+turn it's about to start. Responses (all 200):
+
+```json
+{ "status": "aborted", "sessionId": "…", "turnId": "…" }
+{ "status": "noop",    "sessionId": "…", "reason": "no_active_turn" }
+{ "status": "noop",    "sessionId": "…", "turnId": "…", "reason": "turn_not_current" }
+```
+
+A bare abort (no body) keeps the old semantics: abort whatever turn is
+currently in flight. `turnId` in the `aborted` response is always the
+concrete turn that was cancelled.
+
 Internal (wagent ↔ harness):
 
 - **Claude** — `@anthropic-ai/claude-agent-sdk`'s `query({ prompt, options })`,
-  in-process. The SDK manages the `claude` CLI child. By default every
+  in-process. wagent supplies the SDK's process-spawn hook and owns the
+  detached `claude` CLI process group so teardown reaches MCP children.
+  By default every
   tool call routes through wagent's `canUseTool` callback and surfaces
   as a `permission_request` event that the caller must resolve — i.e.
   the SDK's `--permission-mode bypassPermissions` short-circuit is
@@ -156,6 +196,12 @@ Both adapters translate vendor events into the same `SessionUpdate`
 shape (see `translateClaudeMessage` / `translatePiEvent`), so routes
 only ever see wagent's wire types.
 
+Claude install and model probes share concurrent cache misses so one host
+slowdown counts as one failure. Five consecutive install-probe timeouts
+cause a controlled exit for systemd to restart the service and reap its
+cgroup. Set `WAGENT_PROBE_DEGRADED_THRESHOLD=0` to disable this watchdog;
+the default is `5`.
+
 ## Session lifecycle
 
 1. Client `POST /v1/sessions { agent, cwd, model?, mode?, options? }`.
@@ -172,7 +218,8 @@ only ever see wagent's wire types.
    `'needs_input'`, `stop` → `'idle'`, `subprocess_died` → `'error'`).
 5. Client disconnects: harness **stays alive**. SQLite keeps the event
    log. New connection picks up via `Last-Event-ID`.
-6. `POST /v1/sessions/:id/abort` interrupts the current turn.
+6. `POST /v1/sessions/:id/abort` interrupts the current turn (or a
+   specific one via `{ turnId }` — see "Turns" above).
 7. `DELETE /v1/sessions/:id` ends and removes the session
    (FK-cascades events; cascade-destroys delegation descendants).
 

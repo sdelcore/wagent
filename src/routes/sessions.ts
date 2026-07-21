@@ -229,10 +229,7 @@ export function registerSessionRoutes(app: FastifyInstance, deps: SessionsDeps) 
     // manually, but skip the auto-prompt.
     if (seed.length > 0) {
       try {
-        const proc = await deps.supervisor.ensure(child.id)
-        proc.prompt([{ type: 'text', text: seed }]).catch((err) => {
-          app.log.error({ err, childId: child.id, parentId: parent.id }, 'fork: seed prompt failed')
-        })
+        await deps.supervisor.prompt(child.id, [{ type: 'text', text: seed }])
       } catch (err) {
         const message = err instanceof Error ? err.message : 'spawn failed'
         // The child row is real and the parent link is set. Surface

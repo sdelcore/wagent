@@ -181,10 +181,15 @@ export function translatePiEvent(
   }
 }
 
+interface PiTurn {
+  id: string
+  aborted: boolean
+}
+
 class PiSdkAgent implements AgentProcess {
   private readonly ctx: PiTranslationContext = { messageId: null }
   private readonly unsubscribe: () => void
-  private aborted = false
+  private currentTurn: PiTurn | null = null
 
   constructor(
     private readonly session: AgentSession,
@@ -192,12 +197,12 @@ class PiSdkAgent implements AgentProcess {
   ) {
     this.unsubscribe = session.subscribe((event) => {
       const update = translatePiEvent(event, this.ctx)
-      if (update) this.deps.emit(update)
+      if (update) this.deps.emit(this.currentTurn?.id ?? null, update)
     })
   }
 
-  async prompt(content: WireContent[]): Promise<void> {
-    this.deps.emit({ kind: 'user_message_chunk', content })
+  async prompt(turnId: string, content: WireContent[]): Promise<void> {
+    this.deps.emit(turnId, { kind: 'user_message_chunk', content })
 
     const text = content
       .filter((c) => c.type === 'text' && typeof c.text === 'string')
@@ -212,12 +217,13 @@ class PiSdkAgent implements AgentProcess {
         mimeType: c.mimeType ?? 'image/png',
       }))
 
-    this.aborted = false
+    const turn: PiTurn = { id: turnId, aborted: false }
+    this.currentTurn = turn
     try {
       await this.session.prompt(text, images.length > 0 ? { images } : undefined)
-      this.deps.emit({
+      this.deps.emit(turnId, {
         kind: 'stop',
-        reason: this.aborted ? 'cancelled' : 'end_turn',
+        reason: turn.aborted ? 'cancelled' : 'end_turn',
       })
     } catch (err) {
       this.deps.log.error({ err }, 'pi prompt failed')
@@ -225,21 +231,30 @@ class PiSdkAgent implements AgentProcess {
       // `error` events (already translated above). Anything thrown here
       // is exceptional — surface it as `internal` unless the message
       // matches a known pattern, then terminate the turn.
-      if (!this.aborted) {
+      if (!turn.aborted) {
         const message = err instanceof Error ? err.message : String(err)
-        this.deps.emit(errorPayloadToUpdate(classifyPiErrorMessage(message)))
+        this.deps.emit(turnId, errorPayloadToUpdate(classifyPiErrorMessage(message)))
       }
-      this.deps.emit({
+      this.deps.emit(turnId, {
         kind: 'stop',
-        reason: this.aborted ? 'cancelled' : 'error',
+        reason: turn.aborted ? 'cancelled' : 'error',
       })
-      throw err
+    } finally {
+      if (this.currentTurn === turn) this.currentTurn = null
     }
   }
 
-  async cancel(): Promise<void> {
-    this.aborted = true
-    await this.session.abort()
+  async cancel(turnId: string): Promise<boolean> {
+    const turn = this.currentTurn
+    if (!turn || turn.id !== turnId) return false
+    turn.aborted = true
+    try {
+      await this.session.abort()
+    } catch (err) {
+      turn.aborted = false
+      throw err
+    }
+    return true
   }
 
   async respondPermission(_requestId: string, _outcome: PermissionOutcome): Promise<void> {

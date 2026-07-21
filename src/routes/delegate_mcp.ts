@@ -9,6 +9,7 @@ import {
   type AgentKind,
   type ContentBlock,
   type DelegationMode,
+  type EventEnvelope,
   type SessionUpdate,
 } from '../types.js'
 import type { EventStore } from '../events/store.js'
@@ -446,19 +447,14 @@ async function runDelegate(
   // Wait for stop in sync mode; in background mode return immediately
   // and let the child run on its own.
   if (mode === 'background') {
-    let proc
     try {
-      proc = await deps.supervisor.ensure(child.id)
+      await deps.supervisor.prompt(child.id, [{ type: 'text', text: prompt }])
     } catch (err) {
       return toolError(
         `delegate: failed to spawn child: ${err instanceof Error ? err.message : String(err)}`,
         { childSessionId: child.id },
       )
     }
-    const content: ContentBlock[] = [{ type: 'text', text: prompt }]
-    proc.prompt(content).catch((err) => {
-      app.log.error({ err, childId: child.id }, 'delegate: background child prompt failed')
-    })
     return {
       content: [
         { type: 'text', text: `Spawned child ${child.id} in background. Use delegate_status to check.` },
@@ -474,22 +470,18 @@ async function runDelegate(
   // Sync mode: subscribe before spawning so we don't miss any events.
   const turn = awaitTurn(deps.bus, child.id)
 
-  let proc
   try {
-    proc = await deps.supervisor.ensure(child.id)
+    const submitted = await deps.supervisor.prompt(child.id, [{ type: 'text', text: prompt }])
+    turn.setExpectedTurnId(submitted.turnId)
   } catch (err) {
+    turn.cancel()
     return toolError(
       `delegate: failed to spawn child: ${err instanceof Error ? err.message : String(err)}`,
       { childSessionId: child.id },
     )
   }
 
-  const content: ContentBlock[] = [{ type: 'text', text: prompt }]
-  proc.prompt(content).catch((err) => {
-    app.log.error({ err, childId: child.id }, 'delegate: child prompt failed')
-  })
-
-  const { finalText, stopReason } = await turn
+  const { finalText, stopReason } = await turn.result
 
   const text = finalText.length > 0 ? finalText : `(child stopped: ${stopReason})`
   return {
@@ -935,23 +927,14 @@ async function runDelegateCancel(
   if (child.parentSessionId !== parentSessionId) {
     return toolError('delegate_cancel: child does not belong to this parent')
   }
-  const proc = deps.supervisor.get(child.id)
-  if (!proc) {
-    // No live process — child either finished, never spawned, or was
-    // already cancelled. Idempotent ok.
+  const result = await deps.supervisor.abort(child.id)
+  if (result.status !== 'aborted') {
+    // No live process or no turn in flight — child either finished,
+    // never spawned, or was already cancelled. Idempotent ok.
     return {
       content: [{ type: 'text', text: `(child ${child.id} not running)` }],
       structuredContent: { status: 'noop', childSessionId: child.id },
     }
-  }
-  try {
-    await proc.cancel()
-  } catch (err) {
-    app.log.warn({ err, childId: child.id }, 'delegate_cancel failed')
-    return toolError(
-      `delegate_cancel: ${err instanceof Error ? err.message : String(err)}`,
-      { childSessionId: child.id },
-    )
   }
   return {
     content: [{ type: 'text', text: `(cancel requested for ${child.id})` }],
@@ -1122,11 +1105,22 @@ async function runDelegateCancelRemote(
 // Subscribe to a child's bus, accumulate assistant text, resolve when
 // the session reaches a terminal event. Caller must invoke this before
 // spawning so no early events are missed.
-function awaitTurn(bus: SessionBus, childSessionId: string): Promise<TurnResult> {
-  return new Promise<TurnResult>((resolve) => {
+function awaitTurn(
+  bus: SessionBus,
+  childSessionId: string,
+): { result: Promise<TurnResult>; setExpectedTurnId(turnId: string): void; cancel(): void } {
+  let expectedTurnId: string | null = null
+  const buffered: EventEnvelope[] = []
+  let consume: (ev: EventEnvelope) => void = (ev) => buffered.push(ev)
+  let unsubscribe = () => {}
+  const result = new Promise<TurnResult>((resolve) => {
     let finalText = ''
-    const unsubscribe = bus.subscribe(childSessionId, (ev) => {
+    unsubscribe = bus.subscribe(childSessionId, (ev) => {
+      consume(ev)
+    })
+    consume = (ev) => {
       const payload = ev.payload as SessionUpdate & { text?: string; reason?: string }
+      if (payload.turnId !== expectedTurnId) return
       if (payload.kind === 'agent_message_chunk' && typeof payload.text === 'string') {
         finalText += payload.text
       } else if (payload.kind === 'stop') {
@@ -1136,6 +1130,18 @@ function awaitTurn(bus: SessionBus, childSessionId: string): Promise<TurnResult>
         unsubscribe()
         resolve({ finalText, stopReason: payload.kind })
       }
-    })
+    }
   })
+  return {
+    result,
+    setExpectedTurnId(turnId) {
+      expectedTurnId = turnId
+      for (const event of buffered) consume(event)
+      buffered.length = 0
+    },
+    cancel() {
+      unsubscribe()
+      buffered.length = 0
+    },
+  }
 }

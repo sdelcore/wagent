@@ -10,6 +10,10 @@ export interface Config {
   logLevel: string
   hostname: string
   home: string
+  // Consecutive claude-probe timeouts before the daemon self-exits so
+  // its supervisor (systemd) restarts it and the cgroup kill reaps any
+  // leaked subprocess trees. 0 disables.
+  probeDegradedThreshold: number
 }
 
 function parseOrigins(raw: string | undefined): string[] | true {
@@ -32,5 +36,13 @@ export function loadConfig(): Config {
     logLevel: process.env.LOG_LEVEL ?? 'info',
     hostname: hostname(),
     home: homedir(),
+    probeDegradedThreshold: parseThreshold(process.env.WAGENT_PROBE_DEGRADED_THRESHOLD),
   }
+}
+
+function parseThreshold(raw: string | undefined): number {
+  if (raw === undefined) return 5
+  if (!/^\d+$/.test(raw)) return 5
+  const n = Number(raw)
+  return Number.isSafeInteger(n) ? n : 5
 }

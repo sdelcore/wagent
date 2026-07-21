@@ -863,8 +863,259 @@ test('abort idempotent on session with no live turn', async () => {
   // No prompt sent — supervisor never spawned a process. Abort = noop.
   const res = await api('POST', `/v1/sessions/${session.id}/abort`)
   assert.equal(res.status, 200)
-  const body = (await res.json()) as { status: string }
+  const body = (await res.json()) as { status: string; reason: string }
   assert.equal(body.status, 'noop')
+  assert.equal(body.reason, 'no_active_turn')
+  // Same with a turnId that never existed.
+  const scoped = await json<{ status: string }>('POST', `/v1/sessions/${session.id}/abort`, {
+    turnId: 'never-existed',
+  })
+  assert.equal(scoped.status, 'noop')
+  await api('DELETE', `/v1/sessions/${session.id}`)
+})
+
+test('message: 202 carries a fresh turnId; stop event echoes it', async () => {
+  const session = await json<Session>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    alias: 'turn-ids',
+  })
+
+  const events: SseEvent[] = []
+  const sseDone = streamUntil(
+    `${BASE}/v1/sessions/${session.id}/events/stream`,
+    (e) => events.push(e),
+    (e) => e.data.kind === 'stop',
+    { timeoutMs: 10_000 },
+  )
+  await sleep(150)
+
+  const accepted = await json<{ status: string; turnId: string }>(
+    'POST',
+    `/v1/sessions/${session.id}/message`,
+    { content: [{ type: 'text', text: 'hi' }] },
+  )
+  assert.equal(accepted.status, 'accepted')
+  assert.ok(typeof accepted.turnId === 'string' && accepted.turnId.length > 0)
+
+  await sseDone
+  const userChunk = events.find((e) => e.data.kind === 'user_message_chunk')
+  const stop = events.find((e) => e.data.kind === 'stop')
+  assert.equal((userChunk!.data.payload as { turnId: string }).turnId, accepted.turnId)
+  assert.equal((stop!.data.payload as { turnId: string }).turnId, accepted.turnId)
+
+  // A second turn mints a distinct id.
+  const events2: SseEvent[] = []
+  const sseDone2 = streamUntil(
+    `${BASE}/v1/sessions/${session.id}/events/stream`,
+    (e) => events2.push(e),
+    (e) => e.data.kind === 'stop',
+    { timeoutMs: 10_000, lastEventId: events[events.length - 1]!.id },
+  )
+  await sleep(150)
+  const accepted2 = await json<{ turnId: string }>(
+    'POST',
+    `/v1/sessions/${session.id}/message`,
+    { content: [{ type: 'text', text: 'again' }] },
+  )
+  assert.notEqual(accepted2.turnId, accepted.turnId)
+  await sseDone2
+
+  await api('DELETE', `/v1/sessions/${session.id}`)
+})
+
+test('abort: stale turnId is a no-op and leaves the next turn running', async () => {
+  const session = await json<Session>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    alias: 'stale-abort',
+  })
+
+  // Turn 1 runs to completion.
+  const events1: SseEvent[] = []
+  const sseDone1 = streamUntil(
+    `${BASE}/v1/sessions/${session.id}/events/stream`,
+    (e) => events1.push(e),
+    (e) => e.data.kind === 'stop',
+    { timeoutMs: 10_000 },
+  )
+  await sleep(150)
+  const turn1 = await json<{ turnId: string }>('POST', `/v1/sessions/${session.id}/message`, {
+    content: [{ type: 'text', text: 'first' }],
+  })
+  await sseDone1
+
+  // Turn 2: long enough (~34 chunks × 40ms) to abort partway.
+  const events2: SseEvent[] = []
+  const sseDone2 = streamUntil(
+    `${BASE}/v1/sessions/${session.id}/events/stream`,
+    (e) => events2.push(e),
+    (e) => e.data.kind === 'stop',
+    { timeoutMs: 10_000, lastEventId: events1[events1.length - 1]!.id },
+  )
+  await sleep(150)
+  const turn2 = await json<{ turnId: string }>('POST', `/v1/sessions/${session.id}/message`, {
+    content: [{ type: 'text', text: 'x'.repeat(500) }],
+  })
+  await sleep(120)
+
+  // Abort naming turn 1 — already ended, must not touch turn 2.
+  const stale = await json<{ status: string; reason: string }>(
+    'POST',
+    `/v1/sessions/${session.id}/abort`,
+    { turnId: turn1.turnId },
+  )
+  assert.equal(stale.status, 'noop')
+  assert.equal(stale.reason, 'turn_not_current')
+
+  await sseDone2
+  const stop2 = events2.find((e) => e.data.kind === 'stop')
+  const payload2 = stop2!.data.payload as { reason: string; turnId: string }
+  assert.equal(payload2.reason, 'end_turn', 'turn 2 must run to completion')
+  assert.equal(payload2.turnId, turn2.turnId)
+
+  await api('DELETE', `/v1/sessions/${session.id}`)
+})
+
+test('abort: current turnId cancels the turn', async () => {
+  const session = await json<Session>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+    alias: 'scoped-abort',
+  })
+
+  const events: SseEvent[] = []
+  const sseDone = streamUntil(
+    `${BASE}/v1/sessions/${session.id}/events/stream`,
+    (e) => events.push(e),
+    (e) => e.data.kind === 'stop',
+    { timeoutMs: 10_000 },
+  )
+  await sleep(150)
+  const turn = await json<{ turnId: string }>('POST', `/v1/sessions/${session.id}/message`, {
+    content: [{ type: 'text', text: 'x'.repeat(500) }],
+  })
+  await sleep(120)
+
+  const aborted = await json<{ status: string; turnId: string }>(
+    'POST',
+    `/v1/sessions/${session.id}/abort`,
+    { turnId: turn.turnId },
+  )
+  assert.equal(aborted.status, 'aborted')
+  assert.equal(aborted.turnId, turn.turnId)
+
+  await sseDone
+  const stop = events.find((e) => e.data.kind === 'stop')
+  const payload = stop!.data.payload as { reason: string; turnId: string }
+  assert.equal(payload.reason, 'cancelled')
+  assert.equal(payload.turnId, turn.turnId)
+
+  await api('DELETE', `/v1/sessions/${session.id}`)
+})
+
+test('turns: concurrent prompts serialize boundaries and only the latest completes', async () => {
+  const session = await json<Session>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+  })
+  const events: SseEvent[] = []
+  let stops = 0
+  const sseDone = streamUntil(
+    `${BASE}/v1/sessions/${session.id}/events/stream`,
+    (event) => {
+      events.push(event)
+      if (event.data.kind === 'stop') stops++
+    },
+    () => stops === 3,
+    { timeoutMs: 10_000 },
+  )
+  await sleep(150)
+
+  const first = await json<{ turnId: string }>('POST', `/v1/sessions/${session.id}/message`, {
+    content: [{ type: 'text', text: 'a'.repeat(500) }],
+  })
+  await sleep(120)
+  const replacements = await Promise.all(
+    ['b'.repeat(500), 'last'].map((text) =>
+      json<{ turnId: string }>('POST', `/v1/sessions/${session.id}/message`, {
+        content: [{ type: 'text', text }],
+      }),
+    ),
+  )
+  const turns = [first, ...replacements]
+  await sseDone
+
+  for (const [index, turn] of turns.entries()) {
+    const own = events.filter((event) => event.data.payload.turnId === turn.turnId)
+    assert.equal(own.filter((event) => event.data.kind === 'user_message_chunk').length, 1)
+    assert.equal(own.filter((event) => event.data.kind === 'stop').length, 1)
+    const stop = own.find((event) => event.data.kind === 'stop')!
+    if (index === 0) assert.equal(stop.data.payload.reason, 'cancelled')
+  }
+  const replacementReasons = replacements.map((turn) =>
+    events.find(
+      (event) => event.data.kind === 'stop' && event.data.payload.turnId === turn.turnId,
+    )!.data.payload.reason,
+  )
+  assert.deepEqual(replacementReasons.sort(), ['cancelled', 'end_turn'])
+
+  const boundaries = events
+    .filter((event) => event.data.kind === 'user_message_chunk' || event.data.kind === 'stop')
+    .map((event) => `${event.data.kind}:${String(event.data.payload.turnId)}`)
+  for (const turn of turns) {
+    const userIndex = boundaries.indexOf(`user_message_chunk:${turn.turnId}`)
+    const stopIndex = boundaries.indexOf(`stop:${turn.turnId}`)
+    assert.ok(userIndex >= 0 && stopIndex === userIndex + 1)
+  }
+  await api('DELETE', `/v1/sessions/${session.id}`)
+})
+
+test('abort: queued replacement is cancelled before reaching the adapter', async () => {
+  const session = await json<Session>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+  })
+  const events: SseEvent[] = []
+  let stops = 0
+  const sseDone = streamUntil(
+    `${BASE}/v1/sessions/${session.id}/events/stream`,
+    (event) => {
+      events.push(event)
+      if (event.data.kind === 'stop') stops++
+    },
+    () => stops === 2,
+    { timeoutMs: 10_000 },
+  )
+  await sleep(150)
+  await json<{ turnId: string }>('POST', `/v1/sessions/${session.id}/message`, {
+    content: [{ type: 'text', text: 'x'.repeat(500) }],
+  })
+  const queued = await json<{ turnId: string }>('POST', `/v1/sessions/${session.id}/message`, {
+    content: [{ type: 'text', text: 'must not run' }],
+  })
+  const aborted = await json<{ status: string; turnId: string }>(
+    'POST',
+    `/v1/sessions/${session.id}/abort`,
+    { turnId: queued.turnId },
+  )
+  assert.equal(aborted.status, 'aborted')
+  await sseDone
+  const queuedEvents = events.filter((event) => event.data.payload.turnId === queued.turnId)
+  assert.deepEqual(queuedEvents.map((event) => event.data.kind), ['user_message_chunk', 'stop'])
+  assert.equal(queuedEvents[1]!.data.payload.reason, 'cancelled')
+  await api('DELETE', `/v1/sessions/${session.id}`)
+})
+
+test('abort: non-string turnId → 400 invalid_turn_id', async () => {
+  const session = await json<Session>('POST', '/v1/sessions', {
+    agent: 'echo',
+    cwd: '/tmp',
+  })
+  const res = await api('POST', `/v1/sessions/${session.id}/abort`, { turnId: 42 })
+  assert.equal(res.status, 400)
+  const body = (await res.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'invalid_turn_id')
   await api('DELETE', `/v1/sessions/${session.id}`)
 })
 

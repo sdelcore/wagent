@@ -16,9 +16,14 @@ import type {
 //   4. supervisor calls process.prompt(...) on incoming user prompts
 //   5. process emits events asynchronously through emit
 //   6. supervisor calls process.close() on session destroy / shutdown
+//
+// Turn contract: the supervisor serializes prompts and passes the minted
+// `turnId` to the adapter. The adapter reports every event with the turn
+// that physically produced it and emits exactly one terminal `stop` before
+// prompt() resolves. cancel() returns whether that turn was still active.
 export interface AgentProcess {
-  prompt(content: ContentBlock[]): Promise<void>
-  cancel(): Promise<void>
+  prompt(turnId: string, content: ContentBlock[]): Promise<void>
+  cancel(turnId: string): Promise<boolean>
   respondPermission(requestId: string, outcome: PermissionOutcome): Promise<void>
   // Optional — called by the route layer on PATCH /v1/sessions/:id when
   // the model field changes. Adapters that can hot-switch implement it;
@@ -28,7 +33,7 @@ export interface AgentProcess {
 }
 
 export interface AgentSpawnDeps {
-  emit(update: SessionUpdate): void
+  emit(turnId: string | null, update: SessionUpdate): void
   // Adapters call this when the underlying subprocess exits unexpectedly
   // (i.e. not via close()). Supervisor uses it to remove the dead handle
   // so the next prompt respawns cleanly, and emits a `subprocess_died`
