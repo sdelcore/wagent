@@ -81,6 +81,41 @@ systemd.services.wagent-tailscale-serve = {
 Reachable at `https://<hostname>.<tailnet>.ts.net/` with a Tailscale
 cert.
 
+## home-manager (for a workstation)
+
+Use this instead of the NixOS module when wagent runs on a machine you
+sit at. The NixOS module puts wagent under its own `wagent` system user,
+which has no `claude` login, no `gh` auth and no checkouts — correct for
+a server, useless for a desktop. The home-manager module runs wagent as
+you, so the agents it spawns inherit your credentials.
+
+```nix
+# flake.nix
+inputs.wagent.url = "github:sdelcore/wagent";
+
+# home/<hostname>.nix
+imports = [ inputs.wagent.homeModules.default ];
+services.wagent = {
+  enable = true;
+  bind = "0.0.0.0";          # LAN — see the warning below
+  authTokenPath = "/var/lib/opnix/secrets/wagentAuthToken";
+};
+```
+
+The DB lives at `~/.local/state/wagent/wagent.sqlite`. The wrapper puts
+`~/.local/bin` and `/run/current-system/sw/bin` on PATH and re-exports
+`NIX_LD` so the npm-installed `claude` binary starts under a systemd user
+unit, which otherwise gets neither.
+
+A non-loopback `bind` refuses to start unless `authTokenPath` points at a
+token file. That is deliberate: wagent runs agents as you. Set
+`requireAuth = false` to override it, and only on a network you trust.
+
+Options are declared in [`nix/hm-module.nix`](../nix/hm-module.nix); read
+that rather than a copy here. The ones worth knowing: `bind`, `port`,
+`authTokenPath`, `ghTokenPath`, `requireAuth`, `databasePath`, `cors`,
+and `hosts` (the `wagent-on` remote registry).
+
 ## Any system with Nix
 
 ```bash
