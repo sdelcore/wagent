@@ -239,5 +239,11 @@
       perSystem // {
         nixosModules.default = nixosModule;
         nixosModules.wagent = nixosModule;
+
+        # Sibling of the NixOS module, for running wagent as yourself on a
+        # workstation rather than as a locked-down system user. See
+        # nix/hm-module.nix for why both exist.
+        homeModules.default = import ./nix/hm-module.nix { inherit self; };
+        homeModules.wagent = self.homeModules.default;
       };
 }
